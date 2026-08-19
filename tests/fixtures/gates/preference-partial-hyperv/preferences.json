@@ -1,0 +1,19 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "instancetype.kubevirt.io/v1beta1",
+      "kind": "VirtualMachineClusterPreference",
+      "metadata": {
+        "name": "windows.2k22.partial",
+        "labels": {"instancetype.kubevirt.io/os-type": "windows"}
+      },
+      "spec": {
+        "features": {"preferredHyperv": {"relaxed": {}}},
+        "devices": {"preferredDiskBus": "virtio"},
+        "cpu": {"preferredCPUFeatures": [{"name": "arch-capabilities", "policy": "disable"}]}
+      }
+    }
+  ]
+}

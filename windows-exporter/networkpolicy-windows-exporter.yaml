@@ -1,0 +1,134 @@
+# NetworkPolicy for windows_exporter (TCP 9182)
+#
+# R-19 (v0.19.0 unified review U-26). windows-exporter/README.md states plainly
+# that the exporter is plaintext, unauthenticated, reachable on TCP 9182, and
+# "protected only by network scoping" -- then recommends a NetworkPolicy as the
+# compensating control. That recommendation existed only as prose: no manifest
+# shipped, so the single durable boundary the docs themselves identify had to be
+# hand-authored by every operator, differently, at the exact point where getting
+# it wrong is least visible.
+#
+# WHAT THIS DOES
+#   Default-deny ingress to the virt-launcher pods that are ENROLLED IN
+#   windows_exporter, then allow TCP 9182 from the Prometheus pods that actually
+#   scrape it. Anything else reaching 9182 -- another tenant's workload, a
+#   compromised pod in the same namespace, a curious operator -- is dropped.
+#
+# SCOPE (R-37): both policies select `bsod-detection/windows-exporter: "true"`
+#   on the POD, which requires that label in the VM's
+#   spec.template.metadata.labels. A VM without it -- any Linux VM, and any
+#   Windows VM not running the exporter -- is untouched by these policies.
+#   The first version of this manifest selected `vm.kubevirt.io/name: Exists`,
+#   which KubeVirt sets on every virt-launcher pod regardless of guest OS, so
+#   its deny-by-default would have severed ingress to co-located Linux
+#   workloads. There is no OS label on a virt-launcher pod to select on
+#   (verified live), which is why enrolment rather than OS is the predicate.
+#
+# APPLY PER NAMESPACE holding Windows VMs:
+#   oc apply -n <vm-namespace> -f windows-exporter/networkpolicy-windows-exporter.yaml
+#
+# PREREQUISITE: the cluster network plugin must enforce NetworkPolicy.
+# OVN-Kubernetes (the OCP 4.12+ default) does. Verify with:
+#   oc get network.operator cluster -o jsonpath='{.spec.defaultNetwork.type}{"\n"}'
+# If this returns anything that does not enforce policy, this manifest is inert
+# and the exporter remains reachable from anywhere on the pod network -- do not
+# treat it as applied simply because `oc apply` succeeded.
+#
+# MULTUS / BRIDGE NETWORKING: when Prometheus reaches the guest IP directly
+# rather than the pod network, this policy does not apply to that path -- it
+# governs pod-network ingress only. Scope the in-guest firewall rule
+# (-FirewallRemoteAddress) to the relevant node/machine network instead, as
+# README.md's "Firewall" section describes.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bsod-windows-exporter-deny-by-default
+  labels:
+    app.kubernetes.io/part-of: bsod-detection
+    app.kubernetes.io/component: windows-exporter
+  annotations:
+    bsod-detection/purpose: >-
+      Default-deny ingress to Windows VM pods. Paired with
+      bsod-windows-exporter-allow-prometheus below, which re-opens only TCP 9182
+      to the monitoring stack. Applied first so a mistake in the allow rule fails
+      CLOSED (no ingress) rather than open.
+spec:
+  podSelector:
+    # R-37 (v0.19.0 follow-up N-01): scope to pods actually running the exporter.
+    #
+    # This previously selected `vm.kubevirt.io/name: Exists`, with a comment
+    # claiming it "covers every Windows VM without enumerating names". That was
+    # wrong twice over: KubeVirt sets `vm.kubevirt.io/name` on EVERY
+    # virt-launcher pod, Linux included, so the selector had no OS predicate at
+    # all -- and a default-deny with no OS predicate cuts ingress to co-located
+    # Linux workloads. Verified live: a virt-launcher pod's full label set is
+    # kubevirt.io, kubevirt.io/created-by, kubevirt.io/domain,
+    # kubevirt.io/nodeName, vm.kubevirt.io/name, vmi.kubevirt.io/id -- and
+    # nothing that distinguishes guest OS.
+    #
+    # Selecting on the exporter opt-in label instead is strictly better than an
+    # OS predicate would be: a Windows VM that is not running windows_exporter
+    # has no port 9182 to police, so "Windows" was never the right population.
+    # It is also the SAME label servicemonitor-windows-vms.yaml already selects
+    # on, so enrolment is one contract rather than two.
+    #
+    # NOTE: this must be set in `spec.template.metadata.labels` (the VMI/pod
+    # template), NOT the VM's own `metadata.labels`. Verified live: a VM
+    # carrying `vm.kubevirt.io/os` in metadata.labels does NOT propagate it to
+    # the pod, while `vm.kubevirt.io/name` and `kubevirt.io/domain` -- which
+    # live in spec.template.metadata.labels -- do.
+    #
+    #   oc patch vm <name> -n <ns> --type merge -p \
+    #     '{"spec":{"template":{"metadata":{"labels":{"bsod-detection/windows-exporter":"true"}}}}}'
+    #
+    # A VM without the label is untouched by both policies below -- fail-open on
+    # enrolment, fail-closed on ingress, which is the correct direction for a
+    # policy that could otherwise sever an unrelated workload.
+    matchLabels:
+      bsod-detection/windows-exporter: "true"
+  policyTypes:
+    - Ingress
+  ingress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bsod-windows-exporter-allow-prometheus
+  labels:
+    app.kubernetes.io/part-of: bsod-detection
+    app.kubernetes.io/component: windows-exporter
+  annotations:
+    bsod-detection/purpose: >-
+      Allow the in-cluster Prometheus to scrape windows_exporter on TCP 9182.
+      The exporter is unauthenticated and serves host/OS inventory plus the
+      bsod_* textfile metrics, so scrape reachability is the whole access
+      control -- keep this selector as narrow as your monitoring topology allows.
+spec:
+  podSelector:
+    # Same opt-in selector as the deny policy above -- see the note there.
+    matchLabels:
+      bsod-detection/windows-exporter: "true"
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Platform monitoring (the default target of the shipped ServiceMonitor,
+        # which lives in openshift-cnv with namespaceSelector.any=true).
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+        # User-workload monitoring, when enabled. Harmless if that namespace
+        # does not exist -- an unmatched selector simply allows nothing.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-user-workload-monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9182

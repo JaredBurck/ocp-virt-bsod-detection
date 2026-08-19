@@ -1,0 +1,36 @@
+{
+  "items": [
+    {
+      "kind": "VirtualMachineClusterPreference",
+      "metadata": {
+        "name": "windows.2k22",
+        "labels": {
+          "os.template.kubevirt.io/win2k22": "true"
+        }
+      },
+      "spec": {
+        "devices": {
+          "preferredDiskBus": "virtio",
+          "preferredInterfaceModel": "virtio"
+        },
+        "machine": {
+          "preferredMachineType": "pc-q35-rhel9.6.0"
+        },
+        "features": {
+          "preferredHyperv": {
+            "relaxed": {},
+            "vapic": {},
+            "spinlocks": {"spinlocks": 8191},
+            "vpindex": {},
+            "synic": {},
+            "synictimer": {},
+            "frequencies": {},
+            "reenlightenment": {},
+            "tlbflush": {},
+            "ipi": {}
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "_description": "Single source of truth for Windows-VM detection. R-10 (v0.19.0 unified review U-09). Consumed by every bash/jq selector and by the Python predicate; drift between implementations is enforced-against by scripts/ci/validate-windows-vm-selector.py.",
+  "_why": "CLAUDE.md has always documented that four implementations 'must agree', but agreement rested entirely on human diligence and the contract test only compared the trailing NAME regex. Three real drifts existed simultaneously at v0.19.0: (1) cnv-qga-fleet-collect.sh's standalone fallback omitted the .metadata.labels[\"vm.kubevirt.io/template\"] clause; (2) cnv-windows-exporter-fleet-install.sh's fallback had NO Windows filter at all -- `oc get vm -o jsonpath={.items[*].metadata.name}` returns every VM in the namespace; (3) insights-rules/parsers/vm_spec.py derived os_hint from only 2 of the 6 clauses, so console-created and MTV-imported VMs classifiable only via a top-level metadata label were invisible to the analyzer while visible to the gate script. Because the two layers audited different VM populations, their findings were not comparable.",
+  "_ordering_note": "Structured OS metadata is evaluated first and the name heuristic is a FALLBACK ONLY. A VM carrying explicit OS metadata must never be classified by its name.",
+  "os_hint_pattern": "windows|win2k|win10|win11|win2016|win2019|win2022|win2025|win7|win8|win81|winxp",
+  "_os_hint_pattern_note": "Covers legacy client OSes (Windows 7/8/8.1/XP) alongside currently-shipping ones. Applied case-insensitively to each field in os_hint_fields.",
+  "name_fallback_pattern": "(^|[^a-z])win(dows|web|sql|app|dc|ad|rdp|rds|srv|term|fs|print|host|share|dns|dhcp|xp)?([^a-z]|[0-9]|$)",
+  "_name_fallback_pattern_note": "Matches whole-word win/windows plus the role-concatenated names real MTV-migrated fleets use (windc-prod, winsql-01, winrdp-server), while rejecting substring false positives (darwin, twin, wingnut). win7/win8/win81 already match via the bare [0-9] terminator; 'xp' needs a dedicated suffix word because the character after 'win' in 'winxp' is a letter, which no other bare terminator branch accepts.",
+  "os_hint_fields": [
+    ".spec.template.metadata.annotations[\"vm.kubevirt.io/os\"]",
+    ".spec.template.metadata.labels[\"vm.kubevirt.io/template\"]",
+    ".metadata.labels[\"vm.kubevirt.io/template\"]",
+    ".metadata.labels[\"vm.kubevirt.io/os\"]"
+  ],
+  "structural_predicates": [
+    "(.spec.template.spec.domain.features.hyperv != null)"
+  ],
+  "_structural_predicates_note": "Presence of a hyperv feature block is by itself strong evidence of a Windows guest -- Red Hat's Windows templates always set it and nothing else needs it.",
+  "name_field": ".metadata.name"
+}

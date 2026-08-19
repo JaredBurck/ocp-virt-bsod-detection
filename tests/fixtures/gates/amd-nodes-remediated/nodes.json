@@ -1,0 +1,16 @@
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "worker-amd-1",
+        "labels": {
+          "node-role.kubernetes.io/worker": "",
+          "kubernetes.io/hostname": "worker-amd-1",
+          "cpu-vendor.node.kubevirt.io/AMD": "true",
+          "cpu-family.node.kubevirt.io/23": "true",
+          "cpu-timer.node.kubevirt.io/tsc-frequency": "2500000000"
+        }
+      }
+    }
+  ]
+}

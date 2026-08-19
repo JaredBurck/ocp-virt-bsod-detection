@@ -1,0 +1,32 @@
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "win10-no-hyperv",
+        "namespace": "openshift",
+        "labels": {
+          "os.template.kubevirt.io/win10": "true",
+          "template.kubevirt.io/type": "vm"
+        }
+      },
+      "objects": [
+        {
+          "kind": "VirtualMachine",
+          "spec": {
+            "template": {
+              "metadata": {"annotations": {"vm.kubevirt.io/os": "windows10"}},
+              "spec": {
+                "domain": {
+                  "machine": {"type": "pc-q35-rhel9.4.0"},
+                  "devices": {
+                    "disks": [{"name": "rootdisk", "disk": {"bus": "virtio"}, "bootOrder": 1}]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

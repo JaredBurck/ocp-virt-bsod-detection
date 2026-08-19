@@ -1,0 +1,167 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate-alerts:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        prom_version: ["2.39.1", "2.48.0", "2.55.1", "3.7.3"]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Verify promtool versions match thresholds JSON
+        run: |
+          EXPECTED=$(python3 -c "import json; d=json.load(open('shared/virtio-win-thresholds.json')); print(' '.join(sorted(set(s['prometheus'] for s in d['streams'].values()))))")
+          MATRIX="2.39.1 2.48.0 2.55.1 3.7.3"
+          MATRIX_SORTED=$(echo "$MATRIX" | tr ' ' '\n' | sort | tr '\n' ' ' | xargs)
+          if [ "$EXPECTED" != "$MATRIX_SORTED" ]; then
+            echo "FAIL: CI matrix versions ($MATRIX_SORTED) do not match thresholds JSON ($EXPECTED)"
+            exit 1
+          fi
+          echo "OK: CI promtool versions match thresholds JSON"
+      - name: Cache promtool
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        with:
+          path: /usr/local/bin/promtool
+          key: promtool-${{ matrix.prom_version }}-linux-amd64
+      - name: Install promtool
+        run: |
+          if promtool --version 2>/dev/null | grep -q "${{ matrix.prom_version }}"; then
+            echo "promtool ${{ matrix.prom_version }} from cache"
+          else
+            PROM_VERSION="${{ matrix.prom_version }}"
+            TARBALL="prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+            BASE_URL="https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}"
+            wget -q "${BASE_URL}/${TARBALL}"
+            wget -q "${BASE_URL}/sha256sums.txt"
+            EXPECTED_LINE=$(grep " ${TARBALL}\$" sha256sums.txt || true)
+            if [ -z "$EXPECTED_LINE" ]; then
+              echo "FAIL: no checksum entry for ${TARBALL} in upstream sha256sums.txt"
+              exit 1
+            fi
+            echo "$EXPECTED_LINE" | sha256sum -c -
+            tar xzf "$TARBALL"
+            sudo mv "prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/
+            echo "promtool ${PROM_VERSION} installed (checksum verified)"
+          fi
+      - name: Install Python dependencies
+        run: pip install -q pyyaml
+      - name: Validate PrometheusRule YAML and run promtool tests
+        run: |
+          python3 -c "import yaml; yaml.safe_load(open('alerts/bsod-risk-prometheusrules.yaml')); print('YAML syntax PASS')"
+          python3 scripts/ci/generate-rules-only.py
+          (cd alerts && promtool test rules tests.yaml)
+
+  validate-inhibit-rules:
+    runs-on: ubuntu-latest
+    env:
+      ALERTMANAGER_VERSION: "0.28.1"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -q pyyaml pytest
+      - name: Cache amtool
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        with:
+          path: /usr/local/bin/amtool
+          key: amtool-${{ env.ALERTMANAGER_VERSION }}-linux-amd64
+      - name: Install amtool
+        run: |
+          if amtool --version 2>/dev/null | grep -q "${ALERTMANAGER_VERSION}"; then
+            echo "amtool ${ALERTMANAGER_VERSION} from cache"
+          else
+            TARBALL="alertmanager-${ALERTMANAGER_VERSION}.linux-amd64.tar.gz"
+            BASE_URL="https://github.com/prometheus/alertmanager/releases/download/v${ALERTMANAGER_VERSION}"
+            wget -q "${BASE_URL}/${TARBALL}"
+            wget -q "${BASE_URL}/sha256sums.txt"
+            EXPECTED_LINE=$(grep " ${TARBALL}\$" sha256sums.txt || true)
+            if [ -z "$EXPECTED_LINE" ]; then
+              echo "FAIL: no checksum entry for ${TARBALL} in upstream sha256sums.txt"
+              exit 1
+            fi
+            echo "$EXPECTED_LINE" | sha256sum -c -
+            tar xzf "$TARBALL"
+            sudo mv "alertmanager-${ALERTMANAGER_VERSION}.linux-amd64/amtool" /usr/local/bin/
+            echo "amtool ${ALERTMANAGER_VERSION} installed (checksum verified)"
+          fi
+      - name: Validate inhibit-rules
+        run: |
+          python3 scripts/ci/validate-inhibit-rules.py
+          python3 -m pytest scripts/ci/test_validate_inhibit_rules.py -v
+
+  validate-json:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -q pyyaml pytest
+      - name: Validate shared JSON and contracts
+        run: |
+          python3 -c "import json; json.load(open('shared/virtio-win-thresholds.json')); print('thresholds JSON valid')"
+          python3 -c "import json; json.load(open('shared/virtio-win-guest-os-support.json')); print('guest-OS-support JSON valid')"
+          python3 -c "import json; d=json.load(open('shared/driver-verdict-test-vectors.json')); assert 'vectors' in d; assert 'os_compat_vectors' in d; print(f'test vectors JSON valid ({len(d[\"vectors\"])} vectors, {len(d[\"os_compat_vectors\"])} os_compat_vectors)')"
+          python3 -c "import json; json.load(open('dashboards/bsod-risk-overview.json')); print('dashboard JSON valid')"
+          python3 -c "import json; json.load(open('dashboards/bsod-risk-fleet-overview.json')); print('fleet dashboard JSON valid')"
+          python3 scripts/ci/validate-dashboard-configmap.py
+          python3 scripts/ci/validate-metric-names.py
+          python3 -m pytest scripts/ci/test_validate_dashboard_configmap.py -v
+          python3 -m pytest scripts/ci/test_validate_metric_names.py -v
+          python3 scripts/ci/validate-recording-rule-cardinality.py
+          python3 -m pytest scripts/ci/test_validate_recording_rule_cardinality.py -v
+          python3 scripts/ci/validate-alert-liveness.py
+          python3 -m pytest scripts/ci/test_validate_alert_liveness.py -v
+          python3 scripts/ci/validate-shared-thresholds.py
+
+  validate-acm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Validate ACM policy
+        run: |
+          pip install -q pyyaml ruamel.yaml pytest
+          python3 -c "import yaml; list(yaml.safe_load_all(open('acm/bsod-risk-policy.yaml'))); print('ACM policy YAML valid')"
+          python3 scripts/ci/validate-acm-policy.py
+          python3 scripts/ci/validate-acm-observability-allowlist.py
+          python3 -c "import yaml; list(yaml.safe_load_all(open('acm/placement-rule.yaml'))); print('ACM placement YAML valid')"
+          python3 -c "import yaml; list(yaml.safe_load_all(open('acm/observability-metrics-custom-allowlist.yaml'))); print('ACM observability allowlist YAML valid')"
+          python3 -c "import yaml; list(yaml.safe_load_all(open('dashboards/bsod-risk-fleet-dashboard-configmap.yaml'))); print('Fleet dashboard ConfigMap YAML valid')"
+          python3 -m pytest scripts/ci/test_validate_acm_policy.py -v
+
+  validate-dashboard-configmap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Validate dashboard ConfigMap
+        run: |
+          pip install -q pyyaml
+          python3 -c "import yaml; yaml.safe_load(open('dashboards/bsod-risk-dashboard-configmap.yaml')); print('dashboard ConfigMap YAML valid')"
+          python3 <<'PYEOF'
+          import yaml, json
+          with open('dashboards/bsod-risk-dashboard-configmap.yaml') as f:
+              doc = yaml.safe_load(f)
+          dashboard_json = doc['data']['bsod-risk-overview.json']
+          parsed = json.loads(dashboard_json)
+          assert parsed.get('uid') == 'bsod-risk-overview', f"unexpected uid: {parsed.get('uid')}"
+          assert len(parsed.get('panels', [])) > 0, "dashboard has no panels"
+          print(f"dashboard ConfigMap embeds valid JSON ({len(parsed['panels'])} panels)")
+          PYEOF

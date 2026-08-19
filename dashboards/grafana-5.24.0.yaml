@@ -1,0 +1,396 @@
+# Grafana Operator v5.24.0 — complete installation for BSOD Risk dashboard on OCP.
+#
+# Installs the community Grafana Operator via OLM, creates a Grafana instance
+# with OpenShift OAuth login (oauth-proxy sidecar), persistent storage,
+# a Prometheus datasource connected to the cluster's Thanos Querier,
+# and the BSOD Risk Overview dashboard.
+#
+# Authentication uses the standard OpenShift oauth-proxy pattern: the
+# ServiceAccount acts as the OAuth client, the proxy sidecar handles
+# authentication, and Grafana trusts X-Forwarded-User headers via auth.proxy.
+#
+# OLM manages CRDs, ClusterServiceVersion, and InstallPlan automatically
+# from the Subscription — they are not included here.
+#
+# Prerequisites:
+#   - cluster-admin or equivalent RBAC
+#   - community-operators CatalogSource available (default on OCP)
+#
+# Before applying:
+#   1. Generate a session cookie secret:
+#      COOKIE_SECRET=$(python3 -c "import os,base64; print(base64.urlsafe_b64encode(os.urandom(32)).decode()[:32])")
+#      Then update the grafana-proxy-cookie Secret below.
+#
+#   1a. Create the admin-credentials Secret (used only for direct/break-glass
+#       login -- normal users authenticate via OpenShift OAuth through the
+#       oauth-proxy sidecar and never see this password).
+#
+#       R-20 (v0.19.0): this used to be a <GRAFANA_ADMIN_PASSWORD> placeholder
+#       substituted directly into the Grafana CR. That was never a committed
+#       secret, but once substituted the live password sat in a CR field
+#       readable by anyone with `get grafana` in this namespace, surfaced in
+#       `oc get -o yaml`, leaked into GitOps diffs, and could not be rotated
+#       without editing and re-applying the CR. It is now a Secret consumed as
+#       an env var, so this file never has to contain a credential at all:
+#
+#       oc create secret generic grafana-admin-credentials -n grafana \
+#         --from-literal=admin-user=admin \
+#         --from-literal=admin-password="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+#
+#       Rotate by updating the Secret and restarting the deployment:
+#       oc rollout restart deploy/bsod-grafana-deployment -n grafana
+#
+#   2. After the initial apply (which creates the grafana-sa-token Secret),
+#      create the bearer-token Secret and inject the datasource:
+#
+#      TOKEN=$(oc get secret grafana-sa-token -n grafana -o jsonpath='{.data.token}' | base64 -d)
+#      oc create secret generic grafana-sa-bearer-token -n grafana \
+#        --from-literal=bearer-token="Bearer ${TOKEN}" \
+#        --dry-run=client -o yaml | oc apply -f -
+#
+#      Wait for the Grafana pod to become Ready, then create the datasource
+#      via the API (the operator's valuesFrom mechanism for secureJsonData is
+#      broken in Grafana Operator v5 — the PVC ensures this only needs to be
+#      done once). Read the admin password and bearer token back from the
+#      cluster instead of hardcoding them:
+#
+#      ADMIN_PASSWORD=$(oc get secret grafana-admin-credentials -n grafana -o jsonpath='{.data.admin-password}' | base64 -d)
+#      BEARER_TOKEN=$(oc get secret grafana-sa-bearer-token -n grafana -o jsonpath='{.data.bearer-token}' | base64 -d)
+#      oc exec -n grafana deploy/bsod-grafana-deployment -c grafana -- \
+#        curl -s -X POST --netrc-file <(printf 'machine localhost login admin password %s\n' "$ADMIN_PASSWORD") \
+#          -H "Content-Type: application/json" \
+#          http://localhost:3000/api/datasources \
+#      L2 (v0.16.0): this example previously set "tlsSkipVerify":true, which
+#      disables certificate verification between the Grafana pod and Thanos
+#      Querier. That is unnecessary on OpenShift: the route is in-cluster and
+#      thanos-querier presents a certificate signed by the cluster's own
+#      service CA, which every pod can already validate. Trust that CA
+#      explicitly instead -- skipping verification would also silently accept
+#      an interposed endpoint on the pod network.
+#
+#      SERVICE_CA=$(oc get configmap openshift-service-ca.crt -n grafana \
+#                     -o jsonpath='{.data.service-ca\.crt}')
+#          -d "{\"name\":\"Prometheus\",\"type\":\"prometheus\",\"access\":\"proxy\",
+#               \"url\":\"https://thanos-querier.openshift-monitoring.svc.cluster.local:9091\",
+#               \"isDefault\":true,
+#               \"jsonData\":{\"httpHeaderName1\":\"Authorization\",\"timeInterval\":\"30s\",
+#                              \"tlsAuthWithCACert\":true},
+#               \"secureJsonData\":{\"httpHeaderValue1\":\"${BEARER_TOKEN}\",
+#                                    \"tlsCACert\":\"${SERVICE_CA}\"}}"
+#
+# Apply (two-phase — OLM needs time to register CRDs):
+#   oc apply -f dashboards/grafana-5.24.0.yaml || true
+#   oc wait --for=condition=Established crd/grafanas.grafana.integreatly.org --timeout=120s
+#   oc apply -f dashboards/grafana-5.24.0.yaml
+#
+#   # Wait for grafana-sa-token to be populated, then create bearer-token:
+#   TOKEN=$(oc get secret grafana-sa-token -n grafana -o jsonpath='{.data.token}' | base64 -d)
+#   oc create secret generic grafana-sa-bearer-token -n grafana \
+#     --from-literal=bearer-token="Bearer ${TOKEN}" \
+#     --dry-run=client -o yaml | oc apply -f -
+#   # Wait for pod Ready, then create datasource (see step 2 above)
+#   oc apply -f dashboards/bsod-risk-grafanadashboard-cr.yaml
+#
+# The GrafanaDashboard CR is maintained separately because the dashboard JSON
+# is also published as a ConfigMap (dashboards/bsod-risk-dashboard-configmap.yaml)
+# for environments that use the OCP built-in Grafana.
+
+# --- 1. Namespace ---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: grafana
+  labels:
+    app: bsod-detection
+    openshift.io/cluster-monitoring: "true"
+---
+# --- 2. OperatorGroup (AllNamespaces mode) ---
+# PRE-FLIGHT CHECK (live-cluster validated, 2026-08-02): OLM allows only ONE
+# OperatorGroup per namespace to auto-resolve CSV scope. If the `grafana`
+# namespace/Grafana Operator was already installed previously (e.g. via the
+# OperatorHub console UI, which auto-creates an OperatorGroup like
+# `grafana-<random>`), applying this file's OperatorGroup creates a SECOND
+# one and flips the grafana-operator CSV to `Failed` with reason
+# `TooManyOperatorGroups` -- even though the running Grafana instance/pods
+# are unaffected (existing Deployments keep running; only OLM's ability to
+# manage/reconcile the CSV is broken). Check first:
+#   oc get operatorgroup -n grafana
+# If one already exists, skip this OperatorGroup resource (comment it out or
+# `oc apply` everything else) instead of letting a second one get created.
+# If you hit this after the fact, the fix is to delete the extra one:
+#   oc delete operatorgroup <the-one-this-file-created> -n grafana
+# and confirm recovery: oc get csv grafana-operator.v5.24.0 -n grafana
+# (both OperatorGroups are typically functionally identical AllNamespaces
+# scope, so which one you keep does not matter -- keep the pre-existing one
+# to avoid re-triggering OLM's install-plan machinery).
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: grafana-operator-group
+  namespace: grafana
+  labels:
+    app: bsod-detection
+spec:
+  upgradeStrategy: Default
+---
+# --- 3. Subscription (installs CSV, CRDs, InstallPlan via OLM) ---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: grafana-operator
+  namespace: grafana
+  labels:
+    app: bsod-detection
+    operators.coreos.com/grafana-operator.grafana: ""
+spec:
+  channel: v5
+  installPlanApproval: Automatic
+  name: grafana-operator
+  source: community-operators
+  sourceNamespace: openshift-marketplace
+  startingCSV: grafana-operator.v5.24.0
+---
+# --- 4. ServiceAccount (acts as OAuth client for oauth-proxy) ---
+# The SA name becomes the client ID: system:serviceaccount:grafana:grafana-sa
+# The oauth-redirectreference must point to the Route name created by the operator.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: grafana-sa
+  namespace: grafana
+  labels:
+    app: bsod-detection
+  annotations:
+    serviceaccounts.openshift.io/oauth-redirectreference.grafana: >-
+      {"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"bsod-grafana-route"}}
+---
+# --- 5. Long-lived SA token (source for the bearer-token Secret below) ---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-sa-token
+  namespace: grafana
+  labels:
+    app: bsod-detection
+  annotations:
+    kubernetes.io/service-account.name: grafana-sa
+type: kubernetes.io/service-account-token
+---
+# --- 6. oauth-proxy session cookie secret ---
+# IMPORTANT: Replace <COOKIE_SECRET> with a generated value before applying.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-proxy-cookie
+  namespace: grafana
+  labels:
+    app: bsod-detection
+type: Opaque
+stringData:
+  session_secret: <COOKIE_SECRET>
+---
+# --- 7. ClusterRoleBinding (grants Prometheus/Thanos read access) ---
+#
+# R-20 (v0.19.0 unified review U-28) reviewed this binding and KEPT it, with the
+# reasoning recorded rather than left implicit.
+#
+# `cluster-monitoring-view` is broad: it grants read across all cluster metrics,
+# not just the bsod_* series. It is nevertheless the correct role here --
+# Thanos Querier authorizes on it specifically, and the fleet dashboards are
+# cluster-scoped by definition (per-node CPU vendor labels, cross-namespace VMI
+# metrics). A namespace-scoped alternative cannot answer the questions these
+# dashboards exist to answer.
+#
+# What DOES bound the exposure, and must stay bounded:
+#   * The token belongs to the grafana-sa ServiceAccount, not to logged-in users.
+#     Grafana proxies queries through it, so a Grafana viewer can see whatever
+#     the dashboards query -- which is why `auto_assign_org_role: Viewer` (see
+#     the config block above) matters as much as this binding does.
+#   * auth.proxy `auto_sign_up: true` means every OpenShift user who can reach
+#     the OAuth-authenticated route is auto-provisioned into the Grafana org.
+#     Combined with this cluster-wide read, "can reach the route" is effectively
+#     "can read cluster metrics". If that is too broad for your environment,
+#     restrict at the Route/OAuth layer -- do not weaken this binding, which
+#     would simply break the dashboards.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: grafana-cluster-monitoring-view
+  labels:
+    app: bsod-detection
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitoring-view
+subjects:
+  - kind: ServiceAccount
+    name: grafana-sa
+    namespace: grafana
+---
+# --- 8. PersistentVolumeClaim (survives pod restarts → no more token loss) ---
+# Without this, Grafana's SQLite database is stored on an emptyDir volume.
+# Every pod restart wipes the DB, and the operator's hash-based datasource
+# reconciliation doesn't reliably re-inject secureJsonData (Bearer token).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-data
+  namespace: grafana
+  labels:
+    app: bsod-detection
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+# --- 9. Grafana instance (oauth-proxy sidecar + auth.proxy) ---
+# The oauth-proxy container handles OpenShift OAuth and passes the authenticated
+# username to Grafana via X-Forwarded-User header.
+# Service-serving-cert provides TLS for the proxy; route uses reencrypt.
+# Replace <GRAFANA_ROUTE> with the actual route hostname.
+apiVersion: grafana.integreatly.org/v1beta1
+kind: Grafana
+metadata:
+  name: bsod-grafana
+  namespace: grafana
+  labels:
+    app: bsod-detection
+    dashboards: bsod-grafana
+spec:
+  service:
+    metadata:
+      annotations:
+        service.beta.openshift.io/serving-cert-secret-name: grafana-proxy-tls
+    spec:
+      ports:
+        - name: oauth-proxy
+          port: 8443
+          protocol: TCP
+          targetPort: 8443
+  route:
+    spec:
+      port:
+        targetPort: oauth-proxy
+      tls:
+        termination: reencrypt
+        insecureEdgeTerminationPolicy: Redirect
+  config:
+    log:
+      mode: console
+    server:
+      root_url: https://<GRAFANA_ROUTE>
+    security:
+      admin_user: admin
+      # R-20 (v0.19.0 unified review U-28): admin_password is NO LONGER set here.
+      #
+      # It was a `<GRAFANA_ADMIN_PASSWORD>` placeholder, not a committed secret,
+      # so this was never credential exposure -- but the PATTERN was wrong: once
+      # substituted, the real password lives in a CR field readable by anyone
+      # with `get grafana` in this namespace, it appears in `oc get -o yaml`
+      # output and in any GitOps diff, and it cannot be rotated without editing
+      # and re-applying the CR.
+      #
+      # The password now comes from the `grafana-admin-credentials` Secret via
+      # the GF_SECURITY_ADMIN_PASSWORD env var below. Grafana's env-var override
+      # takes precedence over grafana.ini, so nothing else needs to change.
+    auth:
+      disable_login_form: "true"
+      disable_signout_menu: "true"
+    auth.proxy:
+      enabled: "true"
+      header_name: X-Forwarded-User
+      header_property: username
+      auto_sign_up: "true"
+    auth.anonymous:
+      enabled: "false"
+    users:
+      # Viewer, not Admin: auto_sign_up above means every OpenShift user who
+      # can reach the OAuth-authenticated route is auto-provisioned as a
+      # Grafana org member. Admin here would grant every such user full
+      # Grafana admin rights (datasource/dashboard edit, user management).
+      # Grant Admin explicitly per-user via the Grafana UI/API if needed.
+      auto_assign_org_role: Viewer
+  deployment:
+    spec:
+      template:
+        spec:
+          serviceAccountName: grafana-sa
+          volumes:
+            - name: grafana-data
+              persistentVolumeClaim:
+                claimName: grafana-data
+            - name: proxy-tls
+              secret:
+                secretName: grafana-proxy-tls
+            - name: proxy-cookie
+              secret:
+                secretName: grafana-proxy-cookie
+          containers:
+            - name: grafana
+              # R-20: credentials from a Secret, never from the CR spec.
+              # Create it BEFORE applying this manifest:
+              #   oc create secret generic grafana-admin-credentials -n grafana \
+              #     --from-literal=admin-user=admin \
+              #     --from-literal=admin-password="$(openssl rand -base64 24)"
+              # Rotate by updating the Secret and restarting the deployment --
+              # no CR edit, no re-apply, no password in a GitOps diff.
+              env:
+                - name: GF_SECURITY_ADMIN_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: grafana-admin-credentials
+                      key: admin-user
+                - name: GF_SECURITY_ADMIN_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: grafana-admin-credentials
+                      key: admin-password
+              volumeMounts:
+                - name: grafana-data
+                  mountPath: /var/lib/grafana
+              ports:
+                - containerPort: 3000
+                  name: grafana-http
+                  protocol: TCP
+            - name: oauth-proxy
+              # M2: pinned by digest (Red Hat product registry).
+              image: registry.redhat.io/openshift4/ose-oauth-proxy-rhel9@sha256:fd488e969ad493a1f131ea3791d7241801d2c121bd5a7a6acc8fa1e82de31b2c
+              ports:
+                - containerPort: 8443
+                  name: oauth-proxy
+                  protocol: TCP
+              args:
+                - --https-address=:8443
+                - --http-address=
+                - --provider=openshift
+                - --upstream=http://localhost:3000
+                - --tls-cert=/etc/tls/private/tls.crt
+                - --tls-key=/etc/tls/private/tls.key
+                - --cookie-secret-file=/etc/proxy/cookie/session_secret
+                - --cookie-name=_grafana_oauth
+                - --openshift-service-account=grafana-sa
+                - --pass-user-headers=true
+                - --pass-basic-auth=false
+                - --email-domain=*
+              volumeMounts:
+                - name: proxy-tls
+                  mountPath: /etc/tls/private
+                  readOnly: true
+                - name: proxy-cookie
+                  mountPath: /etc/proxy/cookie
+                  readOnly: true
+---
+# --- 10. Datasource ---
+# NOTE: The GrafanaDatasource CR (operator-managed) is NOT used here because
+# the Grafana Operator v5's valuesFrom mechanism does NOT reliably inject
+# secureJsonData (Bearer token). Instead, the datasource is created once via
+# the Grafana HTTP API after the pod starts (see setup instructions above).
+# The PVC ensures the datasource configuration (including the token) persists
+# across pod restarts — no manual re-injection is needed after initial setup.
+#
+# The bearer token is read directly from the grafana-sa-bearer-token Secret
+# (via `oc get secret ... -o jsonpath`) at the time the setup command in
+# step 2 above is run -- it is not mounted into the container as an env var,
+# so the Grafana pod does not need that Secret to exist before it can start.

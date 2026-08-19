@@ -1,0 +1,35 @@
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "worker-skylake-1",
+        "labels": {
+          "node-role.kubernetes.io/worker": "",
+          "kubernetes.io/hostname": "worker-skylake-1",
+          "cpu-vendor.node.kubevirt.io/Intel": "true",
+          "cpu-model.node.kubevirt.io/Skylake-Server": "true",
+          "cpu-feature.node.kubevirt.io/sse4_2": "true",
+          "cpu-feature.node.kubevirt.io/avx": "true",
+          "cpu-feature.node.kubevirt.io/avx2": "true",
+          "cpu-timer.node.kubevirt.io/tsc-frequency": "2095078000"
+        }
+      }
+    },
+    {
+      "metadata": {
+        "name": "worker-cascadelake-1",
+        "labels": {
+          "node-role.kubernetes.io/worker": "",
+          "kubernetes.io/hostname": "worker-cascadelake-1",
+          "cpu-vendor.node.kubevirt.io/Intel": "true",
+          "cpu-model.node.kubevirt.io/Cascadelake-Server": "true",
+          "cpu-feature.node.kubevirt.io/sse4_2": "true",
+          "cpu-feature.node.kubevirt.io/avx": "true",
+          "cpu-feature.node.kubevirt.io/avx2": "true",
+          "cpu-feature.node.kubevirt.io/avx512f": "true",
+          "cpu-timer.node.kubevirt.io/tsc-frequency": "2095078000"
+        }
+      }
+    }
+  ]
+}

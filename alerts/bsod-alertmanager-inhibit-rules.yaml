@@ -1,0 +1,60 @@
+# alerts/bsod-alertmanager-inhibit-rules.yaml
+#
+# STATUS: INERT -- prepared, not deployed. F14 (v0.17.0 deep-dive review).
+#
+# This formalizes the AlertManager `inhibit_rules` design already described
+# in prose in alerts/README.md's "Upstream Deconfliction (BSODRisk_GuestCrash
+# vs VMNonRecoverableOSPanic)" section (docs/design/roadmap-v1.0.md:510-517 --
+# retired doc, kept for history -- has the original design) as an actual,
+# `amtool`-validated file, so activating it later is a mechanical uncomment,
+# not a from-scratch design/review cycle.
+#
+# WHY INERT, NOT LIVE:
+#   - Every artifact this repo actually deploys today is a PrometheusRule CR
+#     (acm/bsod-risk-policy.yaml, tekton/, etc.) -- there is no existing
+#     automation path that applies raw AlertManager config, so shipping this
+#     "live" would mean introducing a brand-new, untested deployment
+#     mechanism for a rule that inhibits an alert that cannot fire yet.
+#   - The TARGET alert, upstream KubeVirt's `VMNonRecoverableOSPanic`
+#     (kubevirt/kubevirt#18004), and the SOURCE alert's real trigger
+#     (`kubevirt_vmi_guest_os_panic_total`) do not exist on any shipping OCP
+#     Virt release as of this writing -- the same gap CLAUDE.md's Common
+#     Pitfalls section documents for `BSODRisk_GuestCrash` itself. An inhibit
+#     rule between two alerts that can't fire cannot be observed to work
+#     correctly on a live cluster; it would ship unverifiable-in-practice.
+#   - Kept here instead: version-controlled, unit-tested (see
+#     scripts/ci/test_validate_inhibit_rules.py), and exactly the "one-line
+#     uncomment" away from live the day the upstream metric ships.
+#
+# ACTIVATION (when kubevirt_vmi_guest_os_panic_total ships in a released
+# HCO/CNV build -- see docs/design/roadmap-v1.0.md's R-8a status notes for tracking):
+#   1. Strip the leading "# " from every line between the BEGIN/END markers
+#      below (the exact block scripts/ci/validate-inhibit-rules.py already
+#      parses and amtool-validates today, still commented) -- a single
+#      find/replace, not a redesign.
+#   2. Merge the resulting `inhibit_rules:` list into your AlertManager
+#      config. Two supported targets, pick whichever your cluster uses:
+#       a. The `alertmanager-main` Secret in `openshift-monitoring` (raw
+#          `alertmanager.yaml`, same `source_matchers`/`target_matchers`/
+#          `equal` field names used below) -- OCP's platform-monitoring
+#          AlertManager reads this directly.
+#       b. A `monitoring.coreos.com/v1alpha1` `AlertmanagerConfig` CR's
+#          `spec.inhibitRules` -- field names there are `sourceMatch`/
+#          `targetMatch` (list of `{name, value}` pairs, or `matchers` on
+#          Alertmanager Operator v0.24+) instead of `source_matchers`/
+#          `target_matchers`; translate accordingly.
+#   3. Update alerts/README.md's "Upstream Deconfliction" section: replace
+#      "**Interim (current state):** Neither alert fires today..." with a
+#      confirmation that the inhibit rule is now live.
+#   4. Consider whether this belongs in acm/bsod-risk-policy.yaml for
+#      fleet-wide distribution, matching how the PrometheusRule CRs are
+#      already distributed.
+#
+# BEGIN inhibit_rules
+# inhibit_rules:
+#   - source_matchers:
+#       - alertname = "BSODRisk_GuestCrash"
+#     target_matchers:
+#       - alertname = "VMNonRecoverableOSPanic"
+#     equal: ["name", "namespace"]
+# END inhibit_rules
