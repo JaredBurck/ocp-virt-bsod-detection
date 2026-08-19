@@ -1,0 +1,14 @@
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "worker-1",
+        "labels": {
+          "node-role.kubernetes.io/worker": "",
+          "cpu-vendor.node.kubevirt.io/AMD": "true",
+          "host-model-cpu.node.kubevirt.io/EPYC-Genoa": "true"
+        }
+      }
+    }
+  ]
+}

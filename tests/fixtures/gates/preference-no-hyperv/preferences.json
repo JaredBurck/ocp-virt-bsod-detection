@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "kind": "VirtualMachineClusterPreference",
+      "metadata": {
+        "name": "windows.2k22.nohyperv",
+        "labels": {
+          "os.template.kubevirt.io/win2k22": "true"
+        }
+      },
+      "spec": {
+        "devices": {
+          "preferredDiskBus": "virtio",
+          "preferredInterfaceModel": "virtio"
+        },
+        "machine": {
+          "preferredMachineType": "pc-q35-rhel9.4.0"
+        }
+      }
+    }
+  ]
+}

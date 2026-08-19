@@ -1,0 +1,280 @@
+{
+  "_description": "Cross-layer risk-tier contract vectors. Consumed by BOTH tests/test_risk_tier_contract.sh (bash, scripts/lib/risk-scoring.sh) and insights-rules/tests/test_risk_tier_contract.py (Python, plugins/risk_scoring.py). Any divergence fails CI.",
+  "_why": "M-14: the two layers previously used different models (count-based vs weighted) while printing the same CRITICAL/HIGH/MEDIUM/LOW vocabulary, and disagreed on 3 of 4 representative cases in BOTH directions. This file is the mechanism that makes re-divergence impossible -- it mirrors the proven shared/driver-verdict-test-vectors.json pattern.",
+  "_format": "Each case is a set of findings expressed the way the BASH layer sees them (severity + gate + kcs). The Python harness maps gate -> domain via risk-scoring.json's gate_domains so both layers score identical inputs. expected_score is in centi-points (score x 100) and must match exactly -- integer bash math and float Python math agree because every weight is exact to 2dp.",
+  "cases": [
+    {
+      "name": "clean -- no findings",
+      "findings": [],
+      "expected_score": 0,
+      "expected_tier": "LOW"
+    },
+    {
+      "name": "single GENERAL-KNOWLEDGE FAIL, config domain (Gate 6 evictionStrategy=None)",
+      "findings": [
+        {
+          "severity": "FAIL",
+          "gate": 6,
+          "kcs": ""
+        }
+      ],
+      "expected_score": 700,
+      "expected_tier": "MEDIUM"
+    },
+    {
+      "name": "single KCS-VALIDATED FAIL, cpu domain (Gate 9 arch-capabilities)",
+      "findings": [
+        {
+          "severity": "FAIL",
+          "gate": 9,
+          "kcs": "7125237"
+        }
+      ],
+      "expected_score": 2000,
+      "expected_tier": "HIGH"
+    },
+    {
+      "name": "four GENERAL-KNOWLEDGE WARNs in one domain -- rank decay applies",
+      "findings": [
+        {
+          "severity": "WARN",
+          "gate": 5,
+          "kcs": ""
+        },
+        {
+          "severity": "WARN",
+          "gate": 6,
+          "kcs": ""
+        },
+        {
+          "severity": "WARN",
+          "gate": 7,
+          "kcs": ""
+        },
+        {
+          "severity": "WARN",
+          "gate": 13,
+          "kcs": ""
+        }
+      ],
+      "expected_score": 393,
+      "expected_tier": "LOW"
+    },
+    {
+      "name": "three KCS-VALIDATED WARNs across cpu+driver+storage -- no decay (distinct domains)",
+      "findings": [
+        {
+          "severity": "WARN",
+          "gate": 9,
+          "kcs": "7125237"
+        },
+        {
+          "severity": "WARN",
+          "gate": 15,
+          "kcs": "7141291"
+        },
+        {
+          "severity": "WARN",
+          "gate": 10,
+          "kcs": "7136486"
+        }
+      ],
+      "expected_score": 1500,
+      "expected_tier": "HIGH"
+    },
+    {
+      "name": "two KCS-VALIDATED FAILs across cpu+migration",
+      "findings": [
+        {
+          "severity": "FAIL",
+          "gate": 9,
+          "kcs": "7125237"
+        },
+        {
+          "severity": "FAIL",
+          "gate": 1,
+          "kcs": "7141237"
+        }
+      ],
+      "expected_score": 3500,
+      "expected_tier": "CRITICAL"
+    },
+    {
+      "name": "R-21: UNKNOWN contributes 0 to the tier (evidence completeness is its own axis)",
+      "findings": [
+        {
+          "severity": "UNKNOWN",
+          "gate": 10,
+          "kcs": "7136486"
+        }
+      ],
+      "expected_score": 0,
+      "expected_tier": "LOW",
+      "note": "Was 'UNKNOWN is scored -- below WARN, strictly above PASS' (weight 2). Changed by R-21: weighting the framework's own structural blind spots (Gates 15/16 are UNKNOWN by design on any cluster-only run) put every VM at a fixed floor and produced 59/59 HIGH across two live clusters. Unassessed checks are still counted and still block under --fail-on-unknown -- they simply no longer inflate the triage tier."
+    },
+    {
+      "name": "R-21: four unassessed gates still contribute 0 -- absence of evidence is not risk",
+      "findings": [
+        {
+          "severity": "UNKNOWN",
+          "gate": 10,
+          "kcs": "7136486"
+        },
+        {
+          "severity": "UNKNOWN",
+          "gate": 15,
+          "kcs": "7141291"
+        },
+        {
+          "severity": "UNKNOWN",
+          "gate": 11,
+          "kcs": "7132512"
+        },
+        {
+          "severity": "UNKNOWN",
+          "gate": 16,
+          "kcs": "263043"
+        }
+      ],
+      "expected_score": 0,
+      "expected_tier": "LOW",
+      "note": "Was 1050/MEDIUM under the UNKNOWN=2 model. The LOW tier here is only safe because the reporting layer never prints a tier without its evidence percentage beside it (bash verdict line; evidence_completeness in JSON)."
+    },
+    {
+      "name": "L-2: utility KCS (7128506) does NOT grant KCS-VALIDATED",
+      "findings": [
+        {
+          "severity": "FAIL",
+          "gate": 15,
+          "kcs": "7128506"
+        }
+      ],
+      "expected_score": 1050,
+      "expected_tier": "MEDIUM"
+    },
+    {
+      "name": "L-2: process KCS (7129390) does NOT grant KCS-VALIDATED",
+      "findings": [
+        {
+          "severity": "WARN",
+          "gate": 1,
+          "kcs": "7129390"
+        }
+      ],
+      "expected_score": 315,
+      "expected_tier": "LOW"
+    },
+    {
+      "name": "comma-joined KCS list qualifies if ANY member is a trigger article (Gate 19)",
+      "findings": [
+        {
+          "severity": "FAIL",
+          "gate": 19,
+          "kcs": "7132519,7141237,7125237"
+        }
+      ],
+      "expected_score": 1200,
+      "expected_tier": "MEDIUM"
+    },
+    {
+      "name": "PASS contributes nothing",
+      "findings": [
+        {
+          "severity": "PASS",
+          "gate": 9,
+          "kcs": "7125237"
+        },
+        {
+          "severity": "PASS",
+          "gate": 1,
+          "kcs": "7141237"
+        }
+      ],
+      "expected_score": 0,
+      "expected_tier": "LOW"
+    },
+    {
+      "name": "M3: UNMAPPED gate falls upward to the crash weight, not config",
+      "_why": "Every other vector uses a MAPPED gate, which is exactly why a 3x cross-layer divergence went unnoticed: bash defaulted an unknown gate to crash (3.0) while Python's _detect_domain() returned 'config' (1.0) unconditionally, making its own fail-upward default dead code. Gate 99 does not exist in gate_domains by design.",
+      "findings": [
+        {
+          "severity": "FAIL",
+          "gate": 99,
+          "kcs": "7132511"
+        }
+      ],
+      "expected_score": 3000,
+      "expected_tier": "CRITICAL"
+    },
+    {
+      "name": "F-03: gate 22 (at-stream-max) scores 0 in the platform domain, not 4.50 in driver",
+      "findings": [
+        {
+          "severity": "WARN",
+          "gate": 22,
+          "kcs": "7141291"
+        }
+      ],
+      "expected_score": 0,
+      "expected_tier": "LOW"
+    },
+    {
+      "name": "F-03 anti-regression: gate 15 alone is UNCHANGED at 450 -- gate 15 was NOT re-domained wholesale",
+      "findings": [
+        {
+          "severity": "WARN",
+          "gate": 15,
+          "kcs": "7141291"
+        }
+      ],
+      "expected_score": 450,
+      "expected_tier": "LOW"
+    },
+    {
+      "name": "F-03: gate 22 contributes nothing alongside a real gate 15 driver WARN",
+      "findings": [
+        {
+          "severity": "WARN",
+          "gate": 22,
+          "kcs": "7141291"
+        },
+        {
+          "severity": "WARN",
+          "gate": 15,
+          "kcs": "4234591"
+        }
+      ],
+      "expected_score": 450,
+      "expected_tier": "LOW"
+    },
+    {
+      "name": "F-03: capped-stream fleet reality -- platform ceiling + alert-blind must NOT read as MEDIUM risk",
+      "findings": [
+        {
+          "severity": "WARN",
+          "gate": 22,
+          "kcs": "7141291"
+        },
+        {
+          "severity": "WARN",
+          "gate": 20,
+          "kcs": ""
+        }
+      ],
+      "expected_score": 210,
+      "expected_tier": "LOW"
+    },
+    {
+      "name": "F-06: gate 15 below-tooling-floor cites KCS-7128506 -> GENERAL-KNOWLEDGE (315), not KCS-VALIDATED (450)",
+      "findings": [
+        {
+          "severity": "WARN",
+          "gate": 15,
+          "kcs": "7128506"
+        }
+      ],
+      "expected_score": 315,
+      "expected_tier": "LOW"
+    }
+  ]
+}

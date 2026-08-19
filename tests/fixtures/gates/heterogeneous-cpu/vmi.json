@@ -1,0 +1,23 @@
+{
+  "apiVersion": "kubevirt.io/v1",
+  "kind": "VirtualMachineInstance",
+  "metadata": {
+    "name": "win2022-hetcpu",
+    "namespace": "bsod-test"
+  },
+  "status": {
+    "phase": "Running",
+    "nodeName": "worker-skylake-1",
+    "guestOSInfo": {
+      "id": "mswindows",
+      "name": "Microsoft Windows Server 2022 Standard",
+      "version": "10.0.20348"
+    },
+    "conditions": [
+      {
+        "type": "LiveMigratable",
+        "status": "True"
+      }
+    ]
+  }
+}

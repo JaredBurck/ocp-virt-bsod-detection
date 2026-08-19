@@ -1,0 +1,2 @@
+virtio-blk disks present, single vCPU (no multiqueue risk)
+socket count (1) within Windows licensing limits

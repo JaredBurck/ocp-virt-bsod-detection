@@ -1,0 +1,26 @@
+{
+  "items": [
+    {
+      "apiVersion": "kubevirt.io/v1",
+      "kind": "VirtualMachine",
+      "metadata": {
+        "name": "win2k22-good",
+        "namespace": "bsod-test",
+        "labels": {
+          "vm.kubevirt.io/os": "windows2k22"
+        }
+      }
+    },
+    {
+      "apiVersion": "kubevirt.io/v1",
+      "kind": "VirtualMachine",
+      "metadata": {
+        "name": "win2k22-unreachable",
+        "namespace": "bsod-test-2",
+        "labels": {
+          "vm.kubevirt.io/os": "windows2k22"
+        }
+      }
+    }
+  ]
+}

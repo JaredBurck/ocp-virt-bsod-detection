@@ -1,0 +1,25 @@
+# openshift-cnv already carries the openshift.io/cluster-monitoring=true
+# namespace label (applied by the CNV Operator itself, not by this
+# framework) -- the same reason alerts/bsod-risk-prometheusrules.yaml's
+# `prometheus: k8s` PrometheusRule CRs in this namespace already work with
+# no extra enablement step documented anywhere in this repo. This
+# ServiceMonitor needs no additional cluster-monitoring-config change.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: bsod-fleet-exporter
+  namespace: openshift-cnv
+  labels:
+    app.kubernetes.io/component: bsod-detection
+    app.kubernetes.io/part-of: bsod-fleet-exporter
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bsod-fleet-exporter
+  namespaceSelector:
+    matchNames:
+      - openshift-cnv
+  endpoints:
+    - port: metrics
+      interval: 60s
+      path: /metrics

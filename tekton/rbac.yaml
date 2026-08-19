@@ -1,0 +1,73 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bsod-gate-sa
+  namespace: openshift-cnv
+  labels:
+    app.kubernetes.io/component: bsod-detection
+    app.kubernetes.io/part-of: bsod-gate
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bsod-audit-gate
+  labels:
+    app.kubernetes.io/component: bsod-detection
+    app.kubernetes.io/part-of: bsod-gate
+rules:
+  - apiGroups: ["kubevirt.io"]
+    resources:
+      - virtualmachines
+      - virtualmachineinstances
+      - kubevirts
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources:
+      - nodes
+    verbs: ["get", "list"]
+  - apiGroups: ["hco.kubevirt.io"]
+    resources:
+      - hyperconvergeds
+    verbs: ["get", "list"]
+  - apiGroups: ["template.openshift.io"]
+    resources:
+      - templates
+    verbs: ["get", "list"]
+  - apiGroups: ["instancetype.kubevirt.io"]
+    resources:
+      - virtualmachineclusterinstancetypes
+      - virtualmachineclusterpreferences
+      # M-10: the namespaced variants are required too. A VM may reference
+      # either kind via spec.instancetype.kind / spec.preference.kind, and on
+      # OCP 4.19+ (spec_expansion=false) the VM spec is sparse -- so when the
+      # VM is stopped, the referenced object is the ONLY source for its
+      # effective domain. Without read access here the audit cannot resolve a
+      # namespaced-preference VM and silently under-reports it.
+      - virtualmachineinstancetypes
+      - virtualmachinepreferences
+    verbs: ["get", "list"]
+  - apiGroups: ["forklift.konveyor.io"]
+    resources:
+      - plans
+    verbs: ["get", "list"]
+  - apiGroups: ["config.openshift.io"]
+    resources:
+      - clusterversions
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: bsod-audit-gate
+  labels:
+    app.kubernetes.io/component: bsod-detection
+    app.kubernetes.io/part-of: bsod-gate
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: bsod-audit-gate
+subjects:
+  - kind: ServiceAccount
+    name: bsod-gate-sa
+    namespace: openshift-cnv

@@ -1,0 +1,278 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bsod-risk-recording-rules
+  namespace: openshift-cnv
+  labels:
+    prometheus: k8s
+    role: recording-rules
+    app.kubernetes.io/component: bsod-detection
+spec:
+  groups:
+    - name: bsod-risk.recording
+      interval: 5m
+      rules:
+        # KubeVirt exposes _total counters, not _bucket histograms.
+        # Derive average read latency = total_time / total_ops.
+        # Use sum by() to aggregate across instance/pod label churn
+        # from virt-handler restarts or VM rescheduling, which would
+        # otherwise cause the on() join to fail as many-to-many.
+        # Guard denominator > 0 so idle disks do not emit NaN/Inf series.
+        - record: bsod:vmi_disk_latency:avg_1h
+          expr: |
+            (
+              sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_read_times_seconds_total[1h]))
+                /
+              sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_read_total[1h]))
+            )
+            and
+            sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_read_total[1h])) > 0
+
+        - record: bsod:vmi_disk_latency:avg_24h
+          expr: |
+            (
+              sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_read_times_seconds_total[24h]))
+                /
+              sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_read_total[24h]))
+            )
+            and
+            sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_read_total[24h])) > 0
+
+        # WRITE-PATH TWINS (F-01, v0.25.0 peer review).
+        #
+        # Until v0.26.0 every storage-latency signal in this framework's
+        # always-on layer derived exclusively from the READ counters -- a
+        # repo-wide search for kubevirt_vmi_storage_write_times_seconds_total
+        # returned zero hits across the alerts, these recording rules, the ACM
+        # policy, the dashboards and the calibration script. The offline Python
+        # analyzer was already correct (bsod_storage_checks.py evaluates
+        # max(read_latency_ms, write_latency_ms)), so the customer-facing
+        # always-on layer was blind to a risk the Red Hat-only layer caught --
+        # the same "coverage inversion" this file names in the CPU-heterogeneity
+        # comment below, and the same shape as the H-5 defect recorded in
+        # shared/storage-latency-thresholds.json.
+        #
+        # WHY IT MATTERS CLINICALLY: the 60s VirtIO IoTimeoutValue these alerts
+        # exist to predict is DIRECTION-AGNOSTIC -- a write stalling past it
+        # trips viostor/vioscsi exactly as a read does. On the replicated
+        # backends this framework targets (ODF/Ceph RBD), a read may be served
+        # by a single OSD while a write must be acknowledged by every replica,
+        # so during recovery, backfill or an OSD flap write latency can rise by
+        # an order of magnitude while read latency stays nominal. Crash-dump
+        # capture is itself a write, so write starvation both causes the
+        # bugcheck and destroys the evidence of it.
+        #
+        # Same denominator guard and same by() labels as the read twins, so
+        # they join cleanly under max() in the alert expressions and add no new
+        # cardinality (see scripts/ci/validate-recording-rule-cardinality.py --
+        # name/namespace/drive are already on its reviewed allowlist).
+        - record: bsod:vmi_disk_write_latency:avg_1h
+          expr: |
+            (
+              sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_write_times_seconds_total[1h]))
+                /
+              sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_write_total[1h]))
+            )
+            and
+            sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_write_total[1h])) > 0
+
+        - record: bsod:vmi_disk_write_latency:avg_24h
+          expr: |
+            (
+              sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_write_times_seconds_total[24h]))
+                /
+              sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_write_total[24h]))
+            )
+            and
+            sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_write_total[24h])) > 0
+
+        # WORST-DIRECTION latency (F-01). This is what the alerts consume, so
+        # the read/write union lives in exactly ONE place instead of being
+        # re-derived in each of the four storage alert expressions.
+        #
+        # WHY THIS SHAPE. PromQL's max() is an AGGREGATION operator, not a
+        # two-vector function -- `max(a, b)` is a parse error, and the naive
+        # binary form `(a >= b) or b` silently DROPS a series that exists on
+        # only one side (a VM doing reads but no writes, or the reverse, where
+        # the other direction's denominator guard correctly emitted nothing).
+        # That would reintroduce exactly the blindness F-01 is fixing.
+        #
+        # label_replace() stamps a distinguishing `direction` label on each
+        # side so `or` performs a genuine UNION rather than a left-preferring
+        # merge, then `max by (name, namespace, drive)` collapses the pair back
+        # to one series per disk -- dropping `direction` in the process, which
+        # is why the label costs no cardinality downstream. A disk present on
+        # only one side survives with that side's value.
+        #
+        # `$value` in the alert annotations is therefore the worst direction's
+        # latency, not the read value, which is what an operator needs to see.
+        - record: bsod:vmi_disk_latency:worst_1h
+          expr: |
+            max by (name, namespace, drive) (
+              label_replace(bsod:vmi_disk_latency:avg_1h, "direction", "read", "", "")
+              or
+              label_replace(bsod:vmi_disk_write_latency:avg_1h, "direction", "write", "", "")
+            )
+
+        - record: bsod:vmi_disk_latency:worst_24h
+          expr: |
+            max by (name, namespace, drive) (
+              label_replace(bsod:vmi_disk_latency:avg_24h, "direction", "read", "", "")
+              or
+              label_replace(bsod:vmi_disk_write_latency:avg_24h, "direction", "write", "", "")
+            )
+
+        # Per-VM BSOD risk factor count (pre-computed context for crash correlation).
+        # Continuously tracks how many known risk conditions are active per VM so
+        # that when a crash occurs, the pre-crash risk posture is already in TSDB.
+        # Requires: windows_exporter + bsod-textfile-collector.ps1 deployed in guest.
+        # Risk factors counted (0-3 range):
+        #   1. bsod_virtio_driver_outdated == 1 (driver below stream threshold)
+        #   2. min(bsod_io_timeout_value) <= 60 (IoTimeoutValue at or below danger zone)
+        #      THRESHOLD SOURCE: shared/io-timeout-thresholds.json
+        #      (risk_factor_at_or_below_seconds). PromQL cannot read JSON at
+        #      runtime, so this literal is bound to the shared config by
+        #      scripts/ci/validate-shared-thresholds.py -- editing one without
+        #      the other fails CI (M-7).
+        #   3. bsod_crashdump_enabled == 0 (no crash dump configured)
+        # All three metrics are always emitted together by the textfile collector;
+        # if one exists for a VM, all three exist. Returns no series for VMs
+        # without bsod-textfile-collector.ps1 deployed (harmless no-op).
+        - record: bsod:vm_risk_factor_count:gauge
+          expr: |
+            (max by (vm_name) (bsod_virtio_driver_outdated))
+            + on(vm_name)
+            (min by (vm_name) (bsod_io_timeout_value) <= bool 60)
+            + on(vm_name)
+            (max by (vm_name) (bsod_crashdump_enabled == bool 0))
+
+        # Cluster CPU heterogeneity detection (R-9).
+        # Counts distinct CPU CAPABILITY GROUPS among KubeVirt-labelled nodes.
+        #
+        # WHY THIS CHANGED: the previous expression counted CPU *vendors* (AMD
+        # label present + Intel label present). That is blind to intra-vendor
+        # generation heterogeneity, which is the far more common real-world
+        # case. Verified on a live OCP 4.21.10 cluster with 3 AMD workers --
+        # EPYC-Rome + EPYC-Milan, carrying 2 genuinely different feature sets
+        # (delta included pcid, invpcid, erms, pku, amd-psfd):
+        #     vendor-count expression  -> 1  (no heterogeneity detected)
+        #     feature-signature count  -> 2  (matches ground truth)
+        # So BSODRisk_HeterogeneousCPUMigration could never fire there, despite
+        # a real Rome<->Milan live-migration risk (0x101 / 0x9C) that the Python
+        # analyzer's BSOD_CPU_CPU_MODEL_MIGRATION rule *did* detect. That is a
+        # coverage inversion: the customer-facing layer was blind to a risk the
+        # Red Hat-only layer caught.
+        #
+        # HOW IT WORKS: PromQL cannot enumerate label KEYS, so distinct CPU
+        # models cannot be counted directly from host-model-cpu.node.kubevirt.io/*
+        # (each model is its own label key). Instead we group by a small set of
+        # discriminating cpu-feature labels: nodes with identical values across
+        # all of them are one capability group. These particular features were
+        # chosen because they differ across recent Intel and AMD generations and
+        # are present on every KubeVirt-labelled node.
+        #
+        # Scoped to nodes carrying a KubeVirt cpu-vendor label so that
+        # non-virtualization nodes (masters, infra) cannot form a spurious
+        # "empty signature" group and inflate the count.
+        #
+        # STILL AN APPROXIMATION: two generations sharing all five sampled
+        # features group together. Full per-node feature-set comparison remains
+        # available offline via BSOD_CPU_CPU_MODEL_MIGRATION.
+        #
+        # PREREQUISITE: kube-state-metrics must expose KubeVirt node labels.
+        # On OCP 4.14+ with nodes=[*] allowlist (default) this works automatically;
+        # returns 0 otherwise, and the alert then cannot fire (see the
+        # alert-coverage gate for how that gap is surfaced).
+        - record: bsod:cluster_cpu_model_count:gauge
+          expr: |
+            count(
+              count by (
+                label_cpu_feature_node_kubevirt_io_pcid,
+                label_cpu_feature_node_kubevirt_io_invpcid,
+                label_cpu_feature_node_kubevirt_io_pku,
+                label_cpu_feature_node_kubevirt_io_erms,
+                label_cpu_feature_node_kubevirt_io_amd_psfd
+              ) (
+                kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true"}
+                or
+                kube_node_labels{label_cpu_vendor_node_kubevirt_io_intel="true"}
+              )
+            ) or vector(0)
+
+        # Per-cluster BSOD risk summary (R-10 multi-cluster aggregation).
+        # Single low-cardinality series per cluster: sum of all active risk factors
+        # across all VMs with bsod-textfile-collector deployed. Suitable for
+        # forwarding to ACM Observability hub via custom metrics allowlist.
+        # Returns 0 when no VMs have the textfile collector deployed.
+        - record: bsod:cluster_risk_summary:gauge
+          expr: |
+            sum(bsod:vm_risk_factor_count:gauge) or vector(0)
+
+        # Per-cluster driver compliance ratio (R-10).
+        # Fraction of VMs reporting a compliant (not outdated) virtio-win driver.
+        #   1.0    = every reporting VM is compliant
+        #   0.0    = every reporting VM is outdated
+        #   ABSENT = no VM is reporting -- nothing has been assessed
+        #
+        # R-39 (v0.19.0 follow-up N-03): the `or vector(1)` fallback that used to
+        # terminate this expression is REMOVED. It made the "absent" case
+        # unreachable and reported a fabricated **1.0 -- perfect compliance --
+        # precisely when zero VMs had the textfile collector deployed**, i.e. on
+        # every cluster where the guest-evidence path is not yet instrumented.
+        # A fleet dashboard would show 100% driver compliance for a fleet nobody
+        # had measured. Note the comment above already documented "absent = no
+        # data" while the expression guaranteed the opposite -- the intent was
+        # right and the fallback contradicted it.
+        #
+        # An empty vector is Prometheus's native way of saying "no data"; that is
+        # the correct answer here and consumers must render it as such (see
+        # dashboards/README.md, and the `noValue: "N/A"` field config already used
+        # on the Fleet Driver Compliance gauge).
+        #
+        # Deliberately NOT applied to bsod:cluster_risk_summary:gauge above: 0 is
+        # the semantically correct total for "no risk factors reported", and a sum
+        # of nothing genuinely is zero. Claiming 100% *compliance* on no evidence
+        # is a different and worse claim than reporting a zero *count*.
+        # Low-cardinality (single series per cluster); suitable for hub forwarding.
+        - record: bsod:cluster_driver_compliance:ratio
+          expr: |
+            1 - (
+              sum(bsod_virtio_driver_outdated == bool 1) /
+              count(bsod_virtio_driver_outdated)
+            )
+
+        # Fleet-wide evidence completeness (Issue K, R-27's first metric
+        # family -- see scripts/cnv-bsod-fleet-exporter.sh's module header).
+        # sum(assessed)/sum(total) over every VM currently reporting --
+        # checks-WEIGHTED, deliberately NOT a mean of per-VM percentages, and
+        # deliberately NOT pre-aggregated in the exporter itself (the exporter
+        # emits only the raw per-VM counters bsod_vm_checks_assessed/_total;
+        # this recording rule does the one and only aggregation). Naming and
+        # unit convention (0-1 ratio, not 0-100 percent) mirrors
+        # bsod:cluster_driver_compliance:ratio directly above.
+        #
+        # WHY WEIGHTED, NOT avg() (revised post-architectural-review,
+        # 2026-08-04): an earlier version of this rule used
+        # avg(bsod_evidence_completeness_percent) -- an unweighted mean of
+        # per-VM percentages. That disagrees with cnv-win-bsod-audit.sh
+        # --json's own summary.evidence_completeness_pct (checks-weighted)
+        # for the identical input whenever VMs have different check counts,
+        # and is the wrong statistic for a coverage SLO: two VMs at 100% and
+        # 0% completeness average to "50% fleet coverage" regardless of how
+        # many actual checks each contributes. sum()/sum() over raw counts
+        # gives the SAME weighted answer bash/Python already compute, by
+        # construction rather than by coincidence -- see
+        # shared/evidence-completeness-thresholds.json's _units field.
+        #
+        # No `> 0` guard needed: sum() over an empty vector naturally yields
+        # no series (not NaN/Inf), which is the correct "no VMs reporting
+        # yet" answer -- same absent-vs-zero reasoning as
+        # bsod:cluster_driver_compliance:ratio above. A 0/0 divide (NaN) is
+        # not reachable here either: cnv-win-bsod-audit.sh runs its full,
+        # fixed gate set unconditionally against every VM it audits, so
+        # bsod_vm_checks_total is always > 0 for any VM series that exists at
+        # all -- there is no code path that reports a VM with zero attempted
+        # checks.
+        - record: bsod:fleet_evidence_completeness:ratio
+          expr: |
+            sum(bsod_vm_checks_assessed) / sum(bsod_vm_checks_total)
