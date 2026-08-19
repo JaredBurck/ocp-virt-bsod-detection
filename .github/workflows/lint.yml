@@ -1,0 +1,107 @@
+name: Lint
+
+# Live GitHub Actions for the public Layers 3+4 tree. Distinct from the
+# frozen .github/workflows on the GitLab source of truth -- re-derived from
+# .gitlab-ci.yml, scoped to shipped paths only.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-bash:
+    runs-on: ubuntu-latest
+    env:
+      SHELLCHECK_VERSION: "0.11.0"
+      SHELLCHECK_SHA256: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+      SHELLCHECK_TIMEOUT: "120"
+      SHELLCHECK_TIMEOUT_LARGE: "300"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install apt packages
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          echo "apt-get update..."
+          sudo apt-get update -qq
+          echo "apt-get install..."
+          sudo apt-get install -y -qq bash python3 python3-yaml jq wget xz-utils
+          echo "apt packages ready"
+      - name: Install pinned shellcheck
+        run: |
+          echo "fetching shellcheck ${SHELLCHECK_VERSION}..."
+          wget --timeout=30 --tries=3 -O "shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" | sha256sum -c -
+          tar --no-same-owner -xf "shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          sudo mv "shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/
+          shellcheck --version
+      - name: Shellcheck shipped scripts
+        run: |
+          # Same hang class as GitLab lint-bash: 0.9.0 DFA + the 2900-line
+          # audit script. Timeouts fail fast instead of a silent 6h GHA cap.
+          #
+          # SC1091: cnv-qga-fleet-collect.sh and
+          # cnv-windows-exporter-fleet-install.sh optionally source
+          # must-gather/collection-scripts/common_bsod.sh (guarded by
+          # [ -f ]). That file is Layer 1/2 and is not in this tree; GitLab
+          # lint-bash still follows it. -e SC1091 is public-tree only.
+          time timeout "${SHELLCHECK_TIMEOUT_LARGE}" \
+            shellcheck -x -e SC1091 scripts/*.sh scripts/lib/*.sh tests/*.sh
+      - name: Bash syntax check
+        run: |
+          for f in scripts/*.sh scripts/lib/*.sh tests/*.sh; do
+            [ -f "$f" ] && bash -n "$f" && echo "OK: $f"
+          done
+      - name: Validate shell-injection safety (H1)
+        run: python3 scripts/ci/validate-shell-safety.py
+      - name: Validate Tekton param interpolation
+        run: python3 scripts/ci/validate-tekton-param-interpolation.py
+      - name: Validate Windows-VM selector
+        run: python3 scripts/ci/validate-windows-vm-selector.py
+      - name: Validate audit-consumer inventory (H2)
+        run: python3 scripts/ci/validate-unattended-consumers.py
+      - name: Validate base-image pins (M2)
+        run: python3 scripts/ci/validate-base-image-pins.py
+      - name: Validate customer-export allowlist
+        run: python3 scripts/ci/validate-customer-export.py
+
+  lint-powershell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install PowerShell
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y powershell
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
+          $scripts = Get-ChildItem -Recurse -Include *.ps1 scripts/,windows-exporter/ | ForEach-Object { $_.FullName }
+          $allResults = @()
+          foreach ($s in $scripts) {
+            if (Test-Path $s) {
+              $allResults += Invoke-ScriptAnalyzer -Path $s -Severity Error,Warning
+            }
+          }
+          if ($allResults) {
+            $allResults | Format-Table -AutoSize
+            exit 1
+          }
+          $ps7patterns = @("\?\?", "\?\.", "utf8NoBOM")
+          $compat_fail = $false
+          foreach ($s in $scripts) {
+            if (Test-Path $s) {
+              $content = Get-Content $s -Raw
+              foreach ($p in $ps7patterns) {
+                if ($content -match $p) {
+                  Write-Host "ERROR: PS7-only syntax ($p) found in $s"
+                  $compat_fail = $true
+                }
+              }
+            }
+          }
+          if ($compat_fail) { exit 1 }
+          Write-Host "PSScriptAnalyzer + PS 5.1 compat: PASS"

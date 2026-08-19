@@ -1,0 +1,133 @@
+# Issue K / R-27: continuous evidence-completeness exporter Deployment.
+#
+# A Deployment, not a CronJob, despite R-27's own action text ("Scheduled
+# CronJob/Tekton emitting..."): Prometheus's scrape model is PULL, not push,
+# so something has to be listening on a stable HTTP endpoint at whatever
+# moment Prometheus's own scrape interval fires -- a CronJob's Pod is gone
+# between runs and cannot be scraped reliably (a Pushgateway could work
+# around that, but this repo has no Pushgateway anywhere and pushgateway
+# reintroduces its own staleness-detection anti-pattern -- see Prometheus's
+# own docs on when NOT to use it). This single long-lived Pod runs
+# scripts/cnv-bsod-fleet-exporter.sh's OWN internal loop
+# (EXPORTER_INTERVAL_SECONDS) and serves whatever it last collected --
+# functionally "scheduled export", just via an in-process timer rather than
+# a Kubernetes-level schedule.
+#
+# replicas: 1 -- deliberately no HA/leader-election. A second replica would
+# audit the same fleet on its own uncoordinated schedule and could report a
+# different in-flight VM population at any given Prometheus scrape than
+# replica 1, i.e. exactly the "two processes disagreeing" failure mode Issue
+# K's design note (see cnv-bsod-fleet-exporter.sh's module header) exists
+# to avoid. A missed scrape during a Pod restart is a short gap in an
+# already-slow-changing metric (evidence completeness does not spike in
+# seconds), not a correctness problem.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bsod-fleet-exporter
+  namespace: openshift-cnv
+  labels:
+    app.kubernetes.io/name: bsod-fleet-exporter
+    app.kubernetes.io/component: bsod-detection
+    app.kubernetes.io/part-of: bsod-fleet-exporter
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bsod-fleet-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bsod-fleet-exporter
+        app.kubernetes.io/component: bsod-detection
+    spec:
+      # 120s, not the Kubernetes default 30s: bash defers trap execution until
+      # a blocking command substitution completes (see cnv-bsod-fleet-exporter.sh's
+      # on_term()), so a SIGTERM that arrives mid-collect_once() will not run the
+      # HTTP server's clean shutdown until the in-flight --all-namespaces audit
+      # itself finishes -- not until the NEXT trap check. At small-to-medium fleet
+      # sizes (dozens-to-low-hundreds of VMs, this component's tested scale) a
+      # single audit pass completes well inside 120s. At the "thousands of VMs"
+      # scale this design targets (see the exporter script's own INTERVAL-VS-
+      # FLEET-SIZE note), increase this further -- there is no data-loss risk
+      # either way (write_metrics()'s atomic mv means a SIGKILL mid-collection
+      # can only ever lose the in-flight round, never corrupt the metrics file),
+      # just a harder kill than the trap was written to provide.
+      terminationGracePeriodSeconds: 120
+      serviceAccountName: bsod-fleet-exporter-sa
+      # Explicit restricted securityContext -- same rationale and shape as
+      # tekton/bsod-gate-task.yaml's stepTemplate: current RBAC already makes
+      # this pod non-exploitable (bsod-fleet-exporter-sa is bound to the
+      # read-only bsod-audit-gate ClusterRole -- see service-account.yaml),
+      # but an explicit restricted profile costs nothing and satisfies policy
+      # scanners that only check the manifest, not the SCC actually enforced
+      # at admission.
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: exporter
+          image: quay.io/jburck/bsod-fleet-exporter:v0.28.4
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # readOnlyRootFilesystem below needs a writable HOME for `oc`'s
+            # discovery cache, and the exporter's own metrics file -- same
+            # single-emptyDir pattern as tekton/bsod-gate-task.yaml's
+            # stepTemplate ("HOME is pointed there too... since... `oc`
+            # itself wants a writable HOME for its discovery cache").
+            - name: HOME
+              value: "/tmp"
+            - name: EXPORTER_METRICS_DIR
+              value: "/tmp/bsod-metrics"
+            # Namespace scope: unset (default) audits --all-namespaces. Set
+            # this env var on the container (via `oc set env`/a Kustomize
+            # patch) to scope a single namespace instead -- see exporter/
+            # README.md.
+            # - name: EXPORTER_NAMESPACE
+            #   value: "bsod-test"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          # /healthz always returns 200 once serve-metrics.py is listening
+          # (even before the first collection completes -- see the exporter
+          # script's startup placeholder write) -- readinessProbe therefore
+          # only certifies "the HTTP server is up", not "a real audit has
+          # completed", which is the correct readiness contract: Prometheus
+          # should be able to scrape (and see a 503-free response with
+          # possibly zero series) as soon as the pod is reachable, not wait
+          # an entire EXPORTER_INTERVAL_SECONDS for the first fleet audit.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+      volumes:
+        - name: tmp
+          emptyDir: {}

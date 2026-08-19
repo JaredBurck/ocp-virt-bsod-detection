@@ -1,0 +1,43 @@
+{
+  "_description": "Expected BSOD-safe settings for Windows VM templates/preferences. Consumed by bsod_template_checks.py and cnv-win-bsod-audit.sh Gates 17-19.",
+  "_kcs": [
+    "7141237",
+    "7125237",
+    "7132519"
+  ],
+  "required_hyperv_features": [
+    "relaxed",
+    "vapic",
+    "spinlocks",
+    "vpindex",
+    "synic",
+    "synictimer"
+  ],
+  "recommended_hyperv_features": [
+    "frequencies",
+    "reenlightenment",
+    "tlbflush",
+    "ipi"
+  ],
+  "preferred_disk_bus": "virtio",
+  "preferred_interface_model": "virtio",
+  "preferred_machine_type_pattern": "q35",
+  "windows_os_labels": [
+    "win2k8",
+    "win2k8r2",
+    "win2k12",
+    "win2k12r2",
+    "win7",
+    "win81",
+    "win10",
+    "win11",
+    "win2k16",
+    "win2k19",
+    "win2k22",
+    "win2k25"
+  ],
+  "windows_os_label_pattern": "^os\\.template\\.kubevirt\\.io/win",
+  "windows_ostype_key": "instancetype.kubevirt.io/os-type",
+  "windows_ostype_value": "windows",
+  "_windows_os_labels_note": "L-21: reference list of os.template.kubevirt.io/<label> values seen on Red Hat Windows templates and preferences. Detection itself is done by windows_os_label_pattern (a PREFIX match on '/win'), NOT by membership in this list -- so an unlisted Windows label is still detected. The legacy Server 2008/2012/2012R2 entries were added because they dominate real MTV migration backlogs and their absence made the list read as an exhaustive set of supported guests, which it is not. win7/win81 were added for the same reason (legacy client-OS migration backlogs); winxp is deliberately NOT listed here because Red Hat's CNV/KubeVirt common-template catalog never shipped a Windows XP template (XP predates virtio-win/KubeVirt entirely) -- XP is only reachable via the name-fallback detection path (see CLAUDE.md's Windows-VM Detection section), not structured template/preference labels. test_template_checks.py asserts every entry matches the pattern."
+}

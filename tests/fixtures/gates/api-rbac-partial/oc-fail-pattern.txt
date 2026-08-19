@@ -1,0 +1,1 @@
+get nodes|get template|get virtualmachinecluster|get clusterversion

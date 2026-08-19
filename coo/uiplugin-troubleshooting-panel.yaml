@@ -1,0 +1,19 @@
+# TroubleshootingPanel UIPlugin: Korrel8r-powered signal correlation.
+# See coo/README.md's "Part A: Single-Cluster Capabilities" (A1). This is a
+# single-cluster feature and does NOT require RHACM/Part B.
+#
+# GA on OCP 4.19+ with COO 1.2+ (Technology Preview on earlier 4.17/4.18
+# releases). Adds a correlation panel to Observe > Alerting that can trace a
+# firing BSODRisk_* alert to its VMI, virt-launcher pod, node, and (if
+# cluster-logging/LokiStack is deployed) related log lines.
+#
+# If RHACM/Part B is ALSO installed on this same cluster, this requires COO
+# 1.4+ -- earlier versions include RHACM's unresolvable `managed_cluster`
+# label in Korrel8r queries, which silently leaves the correlation graph
+# empty. Not applicable if you only use Part A.
+apiVersion: observability.openshift.io/v1alpha1
+kind: UIPlugin
+metadata:
+  name: troubleshooting-panel
+spec:
+  type: TroubleshootingPanel

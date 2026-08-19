@@ -1,0 +1,81 @@
+# Dockerfile.gate-exporter -- Issue K / R-27: continuous evidence-completeness exporter
+#
+# Runs scripts/cnv-bsod-fleet-exporter.sh as a long-lived Deployment: loops
+# `cnv-win-bsod-audit.sh --json` on an interval and serves the per-VM
+# evidence_completeness field it already computes as a Prometheus metric over
+# HTTP (see scripts/lib/serve-metrics.py). See exporter/ for the
+# Deployment/ServiceAccount/RBAC/Service/ServiceMonitor manifests that deploy
+# this image.
+#
+# This is deliberately its OWN image, not an added ENTRYPOINT override on
+# Dockerfile.gate's image: Dockerfile.gate is intentionally Python-free ("No
+# Python, no insights-rules, no must-gather collection scripts" -- see its own
+# header) because it runs as a short-lived Tekton Task/Job. This image runs
+# forever as a Deployment and needs a way to serve an HTTP endpoint for
+# Prometheus's pull-based scrape model; python3's stdlib http.server is that
+# mechanism (scripts/lib/serve-metrics.py), which is the one thing that
+# justifies a second, slightly heavier base rather than reusing the gate image
+# unchanged.
+#
+# Build:
+#   podman build -t quay.io/jburck/bsod-fleet-exporter:v0.28.4 -f Dockerfile.gate-exporter .
+#
+# Contents: oc + jq + bash + python3 (stdlib-only, no pip packages) + the
+# fleet-exporter script + the audit script it wraps + virtio-win/
+# risk-scoring shared configs the audit script itself needs to run.
+
+# Both bases are pinned by DIGEST, not :latest -- see Dockerfile.gate's own
+# comment for the refresh rationale and commands; identical policy here.
+#
+# Stage 1: extract oc binary from Red Hat's official CLI image
+FROM registry.redhat.io/openshift4/ose-cli@sha256:ef83967297f619f45075e7fd1428a1eb981622a6c174c46fb53b158ed24bed85 AS oc-source
+
+# Stage 2: minimal runtime image
+FROM registry.access.redhat.com/ubi9-minimal@sha256:2a98ec380ad75004992b8538380a5003da64442f0a69237ed236859e023c71d0
+
+LABEL name="bsod-fleet-exporter" \
+      summary="Continuous evidence-completeness metrics exporter for OpenShift Virtualization BSOD detection" \
+      description="Loops the BSOD audit and serves per-VM evidence-completeness as a Prometheus metric. Issue K / R-27." \
+      io.k8s.display-name="BSOD Evidence Completeness Exporter" \
+      io.k8s.description="Continuous per-VM evidence-completeness metric export for OpenShift Virtualization Windows VMs" \
+      version="0.28.4" \
+      maintainer="Jared Burck <jburck@redhat.com>"
+
+RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 \
+      --disablerepo='*' --enablerepo='ubi-9-baseos-rpms' --enablerepo='ubi-9-appstream-rpms' \
+      jq bash sed gawk findutils python3 \
+    && microdnf clean all \
+    && rm -rf /var/cache/yum
+
+COPY --from=oc-source /usr/bin/oc /usr/bin/oc
+
+COPY scripts/cnv-win-bsod-audit.sh /scripts/cnv-win-bsod-audit.sh
+COPY scripts/cnv-bsod-fleet-exporter.sh /scripts/cnv-bsod-fleet-exporter.sh
+COPY scripts/lib/driver-verdict.sh /scripts/lib/driver-verdict.sh
+COPY scripts/lib/risk-scoring.sh /scripts/lib/risk-scoring.sh
+# F-05: this image runs cnv-win-bsod-audit.sh too, so it needs Gate 11's Thanos
+# query helper and the thresholds that helper grades against.
+COPY scripts/lib/prom-query.sh /scripts/lib/prom-query.sh
+COPY scripts/lib/serve-metrics.py /scripts/lib/serve-metrics.py
+COPY shared/virtio-win-thresholds.json /usr/share/bsod-detection/shared/virtio-win-thresholds.json
+COPY shared/virtio-win-guest-os-support.json /usr/share/bsod-detection/shared/virtio-win-guest-os-support.json
+COPY shared/template-baseline.json /usr/share/bsod-detection/shared/template-baseline.json
+COPY shared/risk-scoring.json /usr/share/bsod-detection/shared/risk-scoring.json
+COPY shared/storage-latency-thresholds.json /usr/share/bsod-detection/shared/storage-latency-thresholds.json
+
+RUN chmod +x /scripts/*.sh /scripts/lib/*.sh /scripts/lib/*.py \
+    && useradd -u 1001 -g 0 -M -s /sbin/nologin exporter \
+    && mkdir -p /var/run/bsod-metrics \
+    && chown -R 1001:0 /var/run/bsod-metrics \
+    && chmod -R g=u /var/run/bsod-metrics
+
+# OpenShift's default restricted-v2 SCC runs containers as an arbitrary
+# assigned UID with GID 0 -- USER here is a documented fallback for
+# non-OpenShift runs (e.g. local podman testing), not the identity OCP
+# actually uses. exporter/deployment.yaml sets its own
+# securityContext.runAsNonRoot rather than pinning this UID.
+USER 1001
+
+WORKDIR /scripts
+EXPOSE 8080
+ENTRYPOINT ["/scripts/cnv-bsod-fleet-exporter.sh"]

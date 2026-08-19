@@ -1,0 +1,17 @@
+# Monitoring UIPlugin: Perses-only, single-cluster (no RHACM).
+# See coo/README.md's "Part A: Single-Cluster Capabilities" (A2).
+#
+# This is the minimal variant of coo/uiplugin-monitoring.yaml for clusters
+# that do not run RHACM -- it omits the `acm:` and `clusterHealthAnalyzer:`
+# blocks (Part B, hub-only) and keeps only `perses:`. Use
+# coo/uiplugin-monitoring.yaml instead if this cluster is an RHACM hub with
+# MCO already deployed per acm/observability-deploy-guide.md.
+apiVersion: observability.openshift.io/v1alpha1
+kind: UIPlugin
+metadata:
+  name: monitoring
+spec:
+  type: Monitoring
+  monitoring:
+    perses:
+      enabled: true

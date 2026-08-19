@@ -1,0 +1,152 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bsod-gate-prehook
+  namespace: openshift-cnv
+  labels:
+    app.kubernetes.io/component: bsod-detection
+    app.kubernetes.io/part-of: bsod-gate
+  annotations:
+    description: |
+      MTV/Forklift PreHook Job for BSOD risk gating. Reference this Job
+      in Plan.spec.vms[].hooks[].hook.spec.preHook to block migration of
+      individual VMs that fail the BSOD risk audit.
+
+      This is the framework's only UNATTENDED gate -- Kubernetes Job success
+      IS the migration decision, with no human reading the report. It is
+      therefore configured more conservatively than an interactive run:
+
+        BSOD_STRICT            (default true)  promote select WARNs to FAILs
+        BSOD_FAIL_ON_UNKNOWN   (default true)  block when any check could not
+                                               be evaluated
+
+      BSOD_FAIL_ON_UNKNOWN=true means a VM with no collected guest evidence
+      BLOCKS rather than passes. That is deliberate: "not assessed" must not
+      read as "assessed safe" on an unattended path. Run
+      cnv-qga-fleet-collect.sh before migration, or set it to "false" to
+      accept unassessed VMs (and then read the report yourself).
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: bsod-detection
+    spec:
+      serviceAccountName: bsod-gate-sa
+      restartPolicy: Never
+      # N24 (v0.16.0 #24): explicit, minimal defense-in-depth hardening.
+      # Current RBAC already makes this Job non-exploitable (bsod-gate-sa can
+      # only read VM/VMI/node/template objects -- see tekton/rbac.yaml), but
+      # an explicit restricted securityContext costs nothing and satisfies
+      # policy scanners that only check the manifest, not the SCC actually
+      # enforced at admission.
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bsod-gate
+          image: quay.io/jburck/tekton-bsod-gate:v0.28.4
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # readOnlyRootFilesystem needs somewhere writable for `oc`'s own
+            # discovery cache (which is why HOME is also pointed at /tmp) and
+            # for any temp files the audit script itself creates.
+            - name: tmp
+              mountPath: /tmp
+          env:
+            - name: BSOD_SKIP_MICROCODE_PROBE
+              value: "1"
+            - name: BSOD_STRICT
+              value: "true"
+            # H2: unattended gates must not treat "could not assess" as a pass.
+            - name: BSOD_FAIL_ON_UNKNOWN
+              value: "true"
+            - name: HOME
+              value: "/tmp"
+            - name: VM_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['forklift.konveyor.io/vm-name']
+            - name: VM_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['forklift.konveyor.io/vm-namespace']
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -uo pipefail
+
+              # BSOD_STRICT is now actually CONSUMED. It was previously
+              # declared in env and ignored -- the command hardcoded --strict,
+              # so setting BSOD_STRICT=false had no effect. bsod-gate-task.yaml
+              # already gated on its own param correctly; this sibling was
+              # missed.
+              ARGS=""
+              [ "${BSOD_STRICT:-true}" = "true" ] && ARGS="$ARGS --strict"
+              [ "${BSOD_FAIL_ON_UNKNOWN:-true}" = "true" ] && ARGS="$ARGS --fail-on-unknown"
+
+              if [ -z "${VM_NAME:-}" ] || [ -z "${VM_NAMESPACE:-}" ]; then
+                # Previously this fell back to --cluster-scope-only and the Job
+                # still SUCCEEDED -- so a VM whose Forklift annotations were not
+                # populated was never per-VM assessed, yet migration proceeded.
+                # An unattended gate that cannot identify its subject must
+                # block, not wave it through.
+                echo "ERROR: VM_NAME/VM_NAMESPACE not set by Forklift hook annotations." >&2
+                echo "       Cannot assess the VM this hook was invoked for -- blocking." >&2
+                echo "       Check Plan.spec.vms[].hooks[] and the" >&2
+                echo "       forklift.konveyor.io/vm-name / vm-namespace annotations." >&2
+                exit 1
+              fi
+
+              # R-25 (v0.19.0 unified review U-23): ONE audit invocation.
+              #
+              # This previously ran the full audit twice per gated VM -- once
+              # for the human report and again with --json purely to print the
+              # counts -- doubling apiserver load and wall-clock on the
+              # migration-blocking path. --output-dir writes the machine-readable
+              # per-VM record as a side effect of the SAME run whose exit code is
+              # authoritative, so the two can never describe different states
+              # (the old second run could, in principle, observe a changed
+              # cluster and report counts that did not match the verdict).
+              REPORT_DIR="/tmp/bsod-gate"
+              # shellcheck disable=SC2086
+              /scripts/cnv-win-bsod-audit.sh $ARGS --output-dir "$REPORT_DIR" \
+                "$VM_NAMESPACE" "$VM_NAME"
+              rc=$?
+
+              VM_REPORT="$REPORT_DIR/$VM_NAMESPACE/$VM_NAME.json"
+              if [ -f "$VM_REPORT" ]; then
+                SUMMARY=$(jq -c '{fail: .fail_count, warn: .warn_count,
+                                  unknown: ([.findings[] | select(.severity == "UNKNOWN")] | length)}' \
+                          "$VM_REPORT" 2>/dev/null)
+              fi
+              # Per-VM counts by design: this hook gates ONE VM, and the
+              # operator reading `oc logs` needs to know why THAT VM was
+              # blocked. Cluster-scope findings still affect $rc.
+              echo "BSOD gate summary for $VM_NAMESPACE/$VM_NAME: ${SUMMARY:-<unavailable>}"
+
+              if [ "$rc" -ne 0 ]; then
+                echo "BSOD gate BLOCKED migration of $VM_NAMESPACE/$VM_NAME (exit $rc)." >&2
+                echo "  fail>0        -> a BSOD trigger was found." >&2
+                echo "  unknown>0     -> checks could not be evaluated (collect guest" >&2
+                echo "                   evidence via cnv-qga-fleet-collect.sh, or set" >&2
+                echo "                   BSOD_FAIL_ON_UNKNOWN=false to accept unassessed VMs)." >&2
+              fi
+              exit $rc
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,18 @@
+{
+  "apiVersion": "forklift.konveyor.io/v1beta1",
+  "kind": "Plan",
+  "metadata": {
+    "name": "amd-remediated-plan",
+    "namespace": "openshift-mtv"
+  },
+  "spec": {
+    "targetNamespace": "bsod-test",
+    "warm": false,
+    "vms": [
+      {
+        "id": "vm-1",
+        "name": "win2k22-remediated"
+      }
+    ]
+  }
+}

@@ -1,0 +1,61 @@
+# Dockerfile.gate -- Customer-facing gate container image
+# Lightweight image for running BSOD risk gate checks in Tekton Tasks,
+# MTV PreHook Jobs, or standalone. Separate from must-gather/Dockerfile.
+#
+# Build:
+#   podman build -t quay.io/jburck/tekton-bsod-gate:v0.28.4 -f Dockerfile.gate .
+#
+# Contents: oc + jq + bash gate scripts + virtio-win thresholds
+# No Python, no insights-rules, no must-gather collection scripts.
+
+# M2: both bases are pinned by DIGEST, not :latest.
+#
+# Unlike quay.io/pg.next/pg-must-gather (a Red Hat *development* image that is
+# rebuilt often and whose digests are garbage-collected -- see the extended
+# note in must-gather/Dockerfile), these are Red Hat *product* registries:
+# stable, long-lived, and safe to pin without mirroring. ose-cli:latest below
+# resolved to an image built 2025-09-16, ~10 months old at time of pinning.
+#
+# Refresh deliberately, not incidentally:
+#   skopeo inspect docker://registry.redhat.io/openshift4/ose-cli:latest --format '{{.Digest}}'
+#   skopeo inspect docker://registry.access.redhat.com/ubi9-minimal:latest --format '{{.Digest}}'
+#
+# Stage 1: extract oc binary from Red Hat's official CLI image
+FROM registry.redhat.io/openshift4/ose-cli@sha256:ef83967297f619f45075e7fd1428a1eb981622a6c174c46fb53b158ed24bed85 AS oc-source
+
+# Stage 2: minimal runtime image
+FROM registry.access.redhat.com/ubi9-minimal@sha256:2a98ec380ad75004992b8538380a5003da64442f0a69237ed236859e023c71d0
+
+LABEL name="bsod-gate" \
+      summary="BSOD risk gate for Windows VM migration on OpenShift Virtualization" \
+      description="Runs pre-migration BSOD risk checks against Windows VMs. Customer-facing." \
+      io.k8s.display-name="BSOD Migration Gate" \
+      io.k8s.description="Pre-migration BSOD risk gate for OpenShift Virtualization Windows VMs" \
+      version="0.28.4" \
+      maintainer="Jared Burck <jburck@redhat.com>"
+
+RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 \
+      --disablerepo='*' --enablerepo='ubi-9-baseos-rpms' --enablerepo='ubi-9-appstream-rpms' \
+      jq bash sed gawk findutils \
+    && microdnf clean all \
+    && rm -rf /var/cache/yum
+
+COPY --from=oc-source /usr/bin/oc /usr/bin/oc
+
+COPY scripts/cnv-win-bsod-audit.sh /scripts/cnv-win-bsod-audit.sh
+COPY scripts/cnv-mtv-plan-gate.sh /scripts/cnv-mtv-plan-gate.sh
+COPY scripts/cnv-mtv-fleet-readiness.sh /scripts/cnv-mtv-fleet-readiness.sh
+COPY scripts/lib/driver-verdict.sh /scripts/lib/driver-verdict.sh
+COPY scripts/lib/risk-scoring.sh /scripts/lib/risk-scoring.sh
+# F-05: Gate 11's Thanos query helper, and the thresholds it grades against.
+COPY scripts/lib/prom-query.sh /scripts/lib/prom-query.sh
+COPY shared/virtio-win-thresholds.json /usr/share/bsod-detection/shared/virtio-win-thresholds.json
+COPY shared/virtio-win-guest-os-support.json /usr/share/bsod-detection/shared/virtio-win-guest-os-support.json
+COPY shared/template-baseline.json /usr/share/bsod-detection/shared/template-baseline.json
+COPY shared/risk-scoring.json /usr/share/bsod-detection/shared/risk-scoring.json
+COPY shared/storage-latency-thresholds.json /usr/share/bsod-detection/shared/storage-latency-thresholds.json
+
+RUN chmod +x /scripts/*.sh /scripts/lib/*.sh
+
+WORKDIR /scripts
+ENTRYPOINT ["/scripts/cnv-win-bsod-audit.sh"]

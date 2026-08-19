@@ -1,0 +1,101 @@
+# ACM Observability custom metrics allowlist for BSOD Detection Framework.
+# Deploy to the hub cluster in the open-cluster-management-observability namespace.
+# The metrics collector on each managed cluster will forward these metrics to
+# the hub's Thanos instance, enabling multi-cluster BSOD risk aggregation.
+#
+# Prerequisites:
+#   - ACM 2.13+ with Multicluster Observability Operator enabled
+#     (2.13 is RHACM's currently supported minimum per Red Hat's lifecycle
+#     policy; the `recording_rules:` key was verified against the published
+#     metrics_list.yaml schema for 2.13, 2.15, 2.16 and 2.17 -- it is stable
+#     across that range, not version-conditional)
+#   - BSOD detection recording rules deployed on managed clusters (via ACM policy)
+#   - windows_exporter + bsod-textfile-collector.ps1 deployed on Windows VMs
+#     (for guest-level metrics; recording rules work without this)
+#
+# Cardinality estimate (per managed cluster):
+#   Platform recording rules: 3 series (cluster_risk_summary, driver_compliance, cpu_model_count)
+#   Per-VM disk latency: 1 series per VM per disk (avg ~2-5 per Windows VM),
+#     now x3 directions (read, write, worst) since F-01/v0.26.0. The `worst`
+#     series is a max() over the other two and adds no NEW label -- the
+#     `direction` label used to build it is dropped by the aggregation -- so
+#     this is a 3x on an already-bounded per-disk count, not a new dimension.
+#   Per-VM risk factor: 1 series per VM with textfile collector
+#   Guest metrics: 3-4 series per VM with textfile collector
+#   Total: ~3 + (N_vms * 12-21) series per cluster
+#   For 50 Windows VMs per cluster: ~600-1050 series per managed cluster
+#
+# See acm/observability-deploy-guide.md for deployment and validation instructions.
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: observability-metrics-custom-allowlist
+  namespace: open-cluster-management-observability
+data:
+  metrics_list.yaml: |
+    names:
+      # --- BSOD Recording Rules (platform-level, low cardinality) ---
+      - bsod:cluster_risk_summary:gauge
+      - bsod:cluster_driver_compliance:ratio
+      - bsod:cluster_cpu_model_count:gauge
+      - bsod:vmi_disk_latency:avg_1h
+      - bsod:vmi_disk_latency:avg_24h
+      # F-01 (v0.26.0): write-path twins and the worst-direction union the
+      # storage alerts now consume. Forwarded so a hub-side dashboard can show
+      # WHICH direction degraded, not just that something did.
+      - bsod:vmi_disk_write_latency:avg_1h
+      - bsod:vmi_disk_write_latency:avg_24h
+      - bsod:vmi_disk_latency:worst_1h
+      - bsod:vmi_disk_latency:worst_24h
+      - bsod:vm_risk_factor_count:gauge
+    # R-38 (v0.19.0 follow-up N-02): the key is `recording_rules:`, NOT `rules:`.
+    # RHACM's metrics_list.yaml schema names it `recording_rules:` across the
+    # entire currently-supported range (2.13/2.15/2.16/2.17). Under `rules:` the
+    # MCO parses the document successfully and silently ignores the block, so
+    # bsod:cluster_alert_count:gauge never becomes a series on the hub -- and the
+    # fleet dashboard panel that consumes it renders empty with no error anywhere
+    # to explain why. Guarded by scripts/ci/validate-acm-observability-allowlist.py.
+    recording_rules:
+      # Pre-aggregate per-cluster alert count for fleet dashboard.
+      #
+      # R-48 (found live on RHACM 2.17, 2026-08-04): the label matchers use
+      # SINGLE quotes deliberately. Renaming the key to `recording_rules:`
+      # (R-38) made the MCO finally read this block -- which then exposed a
+      # second, independent defect underneath it.
+      #
+      # The MCO hands each rule to the managed cluster's metrics-collector as a
+      # JSON-encoded command-line flag:
+      #
+      #   --recordingrule={"name":"<record>","query":"<expr>"}
+      #
+      # The custom-allowlist path does NOT escape double quotes inside <expr>
+      # when building that JSON (RHACM's own built-in rules arrive pre-escaped
+      # as `\"`, which is why none of them trip over this). A double-quoted
+      # matcher therefore terminates the JSON string early and the collector
+      # rejects the whole rule, once per scrape interval, with:
+      #
+      #   msg="Input error" rule="{...}" err="invalid character 'B' after
+      #   object key:value pair"
+      #
+      # Observed live: the rule failed on every 5-minute cycle for 31h. It is a
+      # `level=warn` line in the collector's log and nothing else -- the hub
+      # reports no error, the ConfigMap looks correct, and the series simply
+      # never appears. Same silent-failure signature as R-38 itself, one layer
+      # down, which is why fixing the key alone would have looked like it had
+      # worked while still producing nothing.
+      #
+      # PromQL treats 'single' and "double" quoted string literals identically,
+      # so this is a pure encoding workaround with no semantic change.
+      # Guarded by scripts/ci/validate-acm-observability-allowlist.py.
+      - record: bsod:cluster_alert_count:gauge
+        expr: count(ALERTS{alertname=~'BSODRisk_.*', alertstate='firing'}) or vector(0)
+  uwl_metrics_list.yaml: |
+    names:
+      # --- Guest-Level Metrics (user workload, from windows_exporter) ---
+      # These require windows_exporter + bsod-textfile-collector.ps1 in the guest.
+      - bsod_virtio_driver_outdated
+      - bsod_virtio_package_version
+      - bsod_io_timeout_value
+      - bsod_crashdump_enabled
+      - bsod_qga_service_running
+      - bsod_pagefile_max_mb

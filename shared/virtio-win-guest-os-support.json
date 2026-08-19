@@ -1,0 +1,84 @@
+{
+  "_description": "Guest-OS-support axis for virtio-win, orthogonal to shared/virtio-win-thresholds.json's HOST-stream axis. Answers a different question than that file: not 'is this driver version current for the RHEL/OCP stream running it', but 'is this guest OS even a Red Hat-supported OpenShift Virtualization guest at all, or is any '1.9.x' virtio-win package claiming to support it'. N-06 (Wave 7, R-47). Design choice (a) from the plan: a new sibling JSON, not a key nested under virtio-win-thresholds.json's per-stream objects, because this axis is guest-OS-keyed, not host-stream-keyed -- forcing the two into one structure would conflate orthogonal lookup keys.",
+  "_kcs_4234591": "KCS 4234591 ('Certified Guest Operating Systems in OpenShift Virtualization', https://access.redhat.com/articles/4234591, live-checked 2026-08-04) is the PRIMARY citation for every entry below and the reason every entry's confidence is KCS-VALIDATED, not GENERAL-KNOWLEDGE/UNVALIDATED as originally drafted in this file. Its 'Certified guest operating systems' table lists only Windows 10, 11, Server 2016, 2019, 2022, 2025 as Red-Hat-certified/supported Windows guests. Windows XP, 7, Server 2003, Server 2008(R2), and Server 2012(R2) all appear in its 'Known to work' tier instead -- one tier below Certified, and each is annotated with footnote 5: 'The operating system has reached its end of life. Customers are recommended to review with the guest operating system vendor support policies relating to support for end of life products.' Windows 8 and Windows 8.1 appear in NONE of the article's four tables (Certified / Commercial Vendor Supported / Community Supported / Known to work) -- per the article's own 'Other guest operating systems' section, an OS absent from all four tiers 'will be provided [support] in accordance with Red Hat's Third-Party Software Support Policy', which is weaker than even the 'Known to work' tier the other five legacy OSes get.",
+  "_methodology": "Ceilings below are expressed as a virtio-win PACKAGE version in the SAME '1.9.x' RPM-release numbering shared/virtio-win-thresholds.json tracks (the Red Hat/CentOS Stream virtio-win.spec Version: field, e.g. 1.9.24/1.9.57) -- NOT the upstream virtio-win-pkg-scripts/kvm-guest-drivers-windows project's own ISO-build numbering ('0.1.NNN', e.g. 0.1.173). Those are two different, non-comparable numbering tracks maintained by different projects; virtio-win.spec citations below that reference a '0.1.NNN' build are upstream-history evidence for WHY a '1.9.x' ceiling is null, not a value to compare against reported driver versions directly. This axis does not depend on that evidence any more, though -- KCS 4234591 (above) independently establishes the same 'incompatible' conclusion for every entry via the platform-support-tier route instead, which is why every entry below is now KCS-VALIDATED even where the virtio-win.spec driver-archaeology citation is retained only as corroborating detail.",
+  "_incompatible_with_any_tracked_version_semantics": "true means: this guest OS is not in Red Hat's Certified guest-OS tier for OpenShift Virtualization at all (KCS 4234591) AND/OR no '1.9.x'-numbered virtio-win package (the entire family shared/virtio-win-thresholds.json tracks, earliest stream el8_6 starting at max 1.9.24) has ever shipped drivers targeting it -- so ANY driver_version this framework can successfully parse in that family already exceeds this OS's real support ceiling by construction, independent of the specific number reported. This is deliberately NOT modeled as a numeric ceiling of e.g. '0.0.0', to avoid a fabricated tuple silently comparing 'correctly' by accident and obscuring that no real ceiling was ever measured in this numbering track.",
+  "_match_pattern_inputs": "Each match_pattern must match BOTH input conventions this framework feeds it: (1) the terse cluster-side os_hint token this repo's own VM templates/annotations use (vm.kubevirt.io/os values like 'win7', 'win2k22', 'winxp' -- confirmed real-world via tests/fixtures/gates/legacy-client-oversocket/vm.json's 'vm.kubevirt.io/os': 'win7'), consumed by scripts/lib/driver-verdict.sh and insights-rules/plugins/bsod_driver_checks.py; and (2) the guest-local Win32_OperatingSystem.Caption string PowerShell's collect-windows-guest-info.ps1 reads directly on the VM (long-form, e.g. 'Microsoft Windows 7 Professional', 'Microsoft(R) Windows(R) Server 2003, Standard Edition' -- note some legacy Captions interpose '(R)' trademark symbols between words, hence the bounded '.{0,12}' filler below rather than a literal space). UNVALIDATED against a real installed legacy-OS VM (no XP/2003/2008/7/8/8.1 guest was available to confirm the exact Caption string at authoring time) -- these are reconstructed from well-documented, long-stable Microsoft Caption conventions, not observed directly. If a real legacy-OS must-gather or guest collection ever shows a Caption this does NOT match, treat that as a bug in this file, not in the OS.",
+  "os_support": {
+    "winxp": {
+      "display_name": "Windows XP",
+      "match_pattern": "winxp|windows.{0,3}xp",
+      "last_supported_package_version": null,
+      "incompatible_with_any_tracked_version": true,
+      "confidence": "KCS-VALIDATED",
+      "citation": "KCS 4234591's 'Known to work' tier (not Certified), footnote 5 (EOL). Corroborated by virtio-win.spec's `%if 0%{?rhel} > 7` block, which unconditionally rm's the `xp`/`WinXP` driver directories from every RHEL8+-based build -- i.e. every build in the '1.9.x' family this framework tracks (confirmed live in the current spec: https://github.com/virtio-win/virtio-win-pkg-scripts/blob/master/virtio-win.spec, and the CentOS Stream mirror https://gitlab.com/redhat/centos-stream/rpms/virtio-win/-/raw/c10s/virtio-win.spec). The last upstream (0.1.NNN-numbered) build to ship XP-targeting binaries at all was 0.1.173 (2019-12-19), which predates the '1.9.x' numbering entirely -- https://github.com/virtio-win/virtio-win-pkg-scripts/issues/40, https://github.com/virtio-win/kvm-guest-drivers-windows/issues/1109.",
+      "eol_extended_support_end": "2014-04-08",
+      "eol_citation": "Microsoft Product Lifecycle -- Windows XP extended support ended 2014-04-08; matches KCS 4234591 footnote 5's EOL flag."
+    },
+    "win2k3": {
+      "display_name": "Windows Server 2003 (and R2)",
+      "match_pattern": "win2k3|windows.{0,12}server.{0,4}2003",
+      "last_supported_package_version": null,
+      "incompatible_with_any_tracked_version": true,
+      "confidence": "KCS-VALIDATED",
+      "citation": "KCS 4234591's 'Known to work' tier, footnote 5 (EOL). Corroborated by the same virtio-win.spec `rm_driver_dir 2k3`/`Win2003` citation as winxp above.",
+      "eol_extended_support_end": "2015-07-14",
+      "eol_citation": "Microsoft Product Lifecycle -- Windows Server 2003 (and R2) extended support ended 2015-07-14; matches KCS 4234591 footnote 5's EOL flag."
+    },
+    "win2k8": {
+      "display_name": "Windows Server 2008 (and R2)",
+      "match_pattern": "win2k8|windows.{0,12}server.{0,4}2008",
+      "last_supported_package_version": null,
+      "incompatible_with_any_tracked_version": true,
+      "confidence": "KCS-VALIDATED",
+      "citation": "KCS 4234591's 'Known to work' tier lists BOTH 'Windows Server 2008' (32-bit and 64-bit rows) and 'Windows Server 2008 R2' (64-bit) separately, each with footnote 5 (EOL). Corroborated by the same virtio-win.spec `rm_driver_dir 2k8`/`Win2008` citation as winxp above. NOTE: client Windows Vista is the same driver-support era as Server 2008 (they share a kernel/driver-model generation) but has no dedicated os_hint token in shared/windows-vm-selector.json's vocabulary, and is not separately listed in KCS 4234591 either -- there is currently no way for this framework to distinguish a Vista guest from an unrecognized one. Tracked as a follow-up (extend windows-vm-selector.json's os_hint_pattern with a 'winvista' token) rather than silently assumed covered by this entry.",
+      "eol_extended_support_end": "2020-01-14",
+      "eol_citation": "Microsoft Product Lifecycle -- Windows Server 2008/2008 R2 extended support ended 2020-01-14 (Vista mainstream+extended support ended 2017-04-11, earlier still); matches KCS 4234591 footnote 5's EOL flag."
+    },
+    "win2k12": {
+      "display_name": "Windows Server 2012 (and R2)",
+      "match_pattern": "win2k12|windows.{0,12}server.{0,4}2012",
+      "last_supported_package_version": null,
+      "incompatible_with_any_tracked_version": true,
+      "confidence": "KCS-VALIDATED",
+      "citation": "KCS 4234591's 'Known to work' tier lists both 'Windows Server 2012' and 'Windows Server 2012 R2' (64-bit), each with footnote 5 (EOL); 2012 R2 additionally carries an MTV Status of 'Blue' (migrated VMs successfully run on the target cluster) despite not being Certified. NOTE: the article's separate 'Microsoft Windows Features' table lists 'Server 2012r2 / 2016 / 2019' together for VBS support starting 4.19 -- that is a feature-compatibility footnote for a DIFFERENT purpose (which Certified/Known-to-work OSes get which enlightenment) and does not move Server 2012/2012 R2 into the Certified guest-OS tier itself; only 2016/2019/2022/2025/10/11 appear in the 'Certified guest operating systems' table proper.",
+      "eol_extended_support_end": "2023-10-10",
+      "eol_citation": "Microsoft Product Lifecycle -- Windows Server 2012/2012 R2 extended support ended 2023-10-10; matches KCS 4234591 footnote 5's EOL flag."
+    },
+    "win7": {
+      "display_name": "Windows 7",
+      "match_pattern": "win7|windows\\s?7(?!\\d)",
+      "last_supported_package_version": null,
+      "incompatible_with_any_tracked_version": true,
+      "confidence": "KCS-VALIDATED",
+      "citation": "KCS 4234591's 'Known to work' tier (not Certified), footnote 5 (EOL) -- this SUPERSEDES this entry's previous CEILING_NOT_YET_ESTABLISHED/UNVALIDATED status (no '1.9.x' virtio-win package-version cutoff for Win7 had been found at the driver-archaeology level alone). The platform-support-tier route settles the question independently: Windows 7 is not a Red Hat Certified OpenShift Virtualization guest OS regardless of which virtio-win version is installed in it, so incompatible_with_any_tracked_version is now true rather than gated on a driver-version ceiling this file could not establish. (Driver-level corroboration, retained for context: virtio-win.spec does NOT rm Windows 7 driver directories -- osinfo entries for win-7 are still built in the current spec, and upstream driver-binary evidence (virtio-win-pkg-scripts issue #40) shows Win7 vioscsi.inf entries persisting through at least 0.1.271-1 -- so the driver-only signal was genuinely ambiguous before KCS 4234591 resolved it via the platform-support route instead.)",
+      "eol_extended_support_end": "2020-01-14",
+      "eol_citation": "Microsoft Product Lifecycle -- Windows 7 extended support ended 2020-01-14 (ESU program extended paid support for some editions through 2023, now also lapsed); matches KCS 4234591 footnote 5's EOL flag."
+    },
+    "win8": {
+      "display_name": "Windows 8",
+      "match_pattern": "win8(?!1)|windows\\s?8(?!\\.?1)",
+      "last_supported_package_version": null,
+      "incompatible_with_any_tracked_version": true,
+      "confidence": "KCS-VALIDATED",
+      "citation": "Windows 8 does not appear in ANY of KCS 4234591's four support tiers (Certified / Commercial Vendor Supported / Community Supported / Known to work) -- per the article's 'Other guest operating systems' section, an unlisted OS falls to Red Hat's Third-Party Software Support Policy, a WEAKER position than even the 'Known to work' tier winxp/win7/win2k3/win2k8/win2k12 get above. (Driver-level corroboration, retained for context: virtio-win/kvm-guest-drivers-windows PR #1408, 'RHEL-108792: remove code related to unsupported Windows versions', 2026, targets Win8 -- consistent with, though not required to establish, this entry's conclusion.)",
+      "eol_extended_support_end": "2016-01-12",
+      "eol_citation": "Microsoft Product Lifecycle -- Windows 8 (non-.1) support ended 2016-01-12; users were required to update to 8.1 to continue receiving updates before that date."
+    },
+    "win81": {
+      "display_name": "Windows 8.1",
+      "match_pattern": "win8\\.?1|windows\\s?8\\.1",
+      "last_supported_package_version": null,
+      "incompatible_with_any_tracked_version": true,
+      "confidence": "KCS-VALIDATED",
+      "citation": "Same as win8 above -- Windows 8.1 does not appear in any of KCS 4234591's four support tiers either, falling to Red Hat's Third-Party Software Support Policy. (Driver-level corroboration, retained for context: virtio-win/kvm-guest-drivers-windows commit 21ed919, 'RHEL-118364: remove deprecated Win 8.1 OS versions from inf2cat', 2026-03-09, dropped Win8.1 from the WHQL inf2cat OS list.)",
+      "eol_extended_support_end": "2023-01-10",
+      "eol_citation": "Microsoft Product Lifecycle -- Windows 8.1 extended support ended 2023-01-10."
+    }
+  },
+  "_match_order": [
+    "win81", "winxp", "win2k3", "win2k8", "win2k12", "win7", "win8"
+  ],
+  "_match_order_note": "win81 must be checked before win8 (win8's own match_pattern excludes a trailing '1' via negative lookahead as a second line of defense, but bash/PowerShell string matching has no lookahead -- the ORDER these are checked in is each layer's actual guard, matching bash Gate 14's own established precedent of ordering case-glob branches so more specific patterns are tested first). win2k12 has no ordering dependency on win2k3/win2k8 (mutually exclusive substrings) but is listed adjacently for readability.",
+  "_known_gaps": "Windows 10 general/consumer support itself ended 2025-10-14 (Microsoft Product Lifecycle) -- i.e. it became EOL within this project's own lifetime (repo baseline authored 2026) -- yet KCS 4234591 still lists Windows 10 in the Certified tier as of this article's last-checked date (2026-08-04), with no deprecation/removal marker in the table. It is deliberately NOT included in os_support above pending Red Hat updating that Certified-tier listing; treating it as incompatible ahead of Red Hat's own certification matrix would be presenting an UNVALIDATED inference as KCS-VALIDATED fact, the exact discipline CLAUDE.md's confidence tiers exist to prevent. Revisit this file once KCS 4234591 itself moves Windows 10 out of the Certified table. Client Windows Vista (see win2k8's citation above) remains a real gap for a different reason -- no dedicated os_hint token exists to detect it at all, not an open support-tier question."
+}
