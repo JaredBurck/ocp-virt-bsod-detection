@@ -1,0 +1,153 @@
+{
+  "_description": "R-21 (v0.19.0 unified review U-18): CALIBRATION vectors -- do the tiers mean anything useful? Consumed by BOTH tests/test_risk_tier_contract.sh and insights-rules/tests/test_risk_tier_contract.py, exactly like shared/risk-tier-test-vectors.json.",
+  "_why_separate_from_parity_vectors": "risk-tier-test-vectors.json asserts a SAFETY property -- bash and Python produce the same tier for the same finding set -- which prevents a customer being shown LOW for a VM Red Hat's analyzer later calls HIGH (the v0.15.0 incident). That is necessary but not sufficient: two layers can agree perfectly on a number that carries no information, which is precisely what the v0.19.0 live review measured (59 of 59 VMs HIGH across two clusters, bash and Python in perfect agreement, zero triage value). These vectors assert the orthogonal VALIDITY property: a clean VM scores low, a broken VM scores high, and the bands are separated. Kept in a separate file because they take different inputs and assert a different thing -- but deliberately consumed by BOTH harnesses, because a Python-only calibration suite would leave the CUSTOMER-FACING bash layer's usefulness unproven, which is the layer whose output an operator actually triages on.",
+  "_format": "Same case shape as risk-tier-test-vectors.json (severity + gate + kcs, the way the bash layer sees findings) so one harness can run both files. expected_tier is asserted; expected_score is advisory and asserted only when present. Finding sets are taken from REAL audit output on cluster-thdjk / cluster-f5rfz, not invented.",
+  "cases": [
+    {
+      "name": "calibration: fully clean VM, complete evidence -- must be LOW",
+      "findings": [],
+      "expected_score": 0,
+      "expected_tier": "LOW"
+    },
+    {
+      "name": "calibration: clean VM, NO guest evidence -- UNKNOWN must not inflate the tier (this is the 59/59-HIGH regression)",
+      "findings": [
+        {
+          "severity": "UNKNOWN",
+          "gate": 11,
+          "kcs": "7132512"
+        },
+        {
+          "severity": "UNKNOWN",
+          "gate": 15,
+          "kcs": "7141291"
+        },
+        {
+          "severity": "UNKNOWN",
+          "gate": 16,
+          "kcs": "263043"
+        }
+      ],
+      "expected_score": 0,
+      "expected_tier": "LOW"
+    },
+    {
+      "name": "calibration: single KCS-validated cpu WARN (AMD arch-capabilities) -- MEDIUM, not HIGH",
+      "findings": [
+        {
+          "severity": "WARN",
+          "gate": 9,
+          "kcs": "7125237"
+        }
+      ],
+      "expected_score": 600,
+      "expected_tier": "MEDIUM"
+    },
+    {
+      "name": "calibration: reference-good VM as observed live (1 cpu WARN + 3 structural UNKNOWNs) -- MEDIUM",
+      "findings": [
+        {
+          "severity": "WARN",
+          "gate": 9,
+          "kcs": "7125237"
+        },
+        {
+          "severity": "UNKNOWN",
+          "gate": 11,
+          "kcs": "7132512"
+        },
+        {
+          "severity": "UNKNOWN",
+          "gate": 15,
+          "kcs": "7141291"
+        },
+        {
+          "severity": "UNKNOWN",
+          "gate": 16,
+          "kcs": "263043"
+        }
+      ],
+      "expected_score": 600,
+      "expected_tier": "MEDIUM"
+    },
+    {
+      "name": "calibration: genuinely broken VM (driver FAIL + cpu FAIL) -- CRITICAL",
+      "findings": [
+        {
+          "severity": "FAIL",
+          "gate": 15,
+          "kcs": "7141291"
+        },
+        {
+          "severity": "FAIL",
+          "gate": 9,
+          "kcs": "7125237"
+        }
+      ],
+      "expected_score": 3500,
+      "expected_tier": "CRITICAL"
+    },
+    {
+      "name": "calibration: a lone GENERAL-KNOWLEDGE config FAIL scores MEDIUM -- pairs with the next case to prove UNKNOWNs do not move it",
+      "findings": [
+        {
+          "severity": "FAIL",
+          "gate": 6,
+          "kcs": ""
+        }
+      ],
+      "expected_tier": "MEDIUM",
+      "expected_score": 700
+    },
+    {
+      "name": "calibration: KCS-validated driver FAIL + cpu WARN -- HIGH, strictly above every clean-VM case above",
+      "findings": [
+        {
+          "severity": "FAIL",
+          "gate": 15,
+          "kcs": "7141291"
+        },
+        {
+          "severity": "WARN",
+          "gate": 9,
+          "kcs": "7125237"
+        }
+      ],
+      "expected_tier": "HIGH",
+      "expected_score": 2100
+    },
+    {
+      "name": "calibration: the SAME config FAIL buried under four UNKNOWNs must score identically -- unassessed checks may never dilute or inflate a real finding",
+      "findings": [
+        {
+          "severity": "FAIL",
+          "gate": 6,
+          "kcs": ""
+        },
+        {
+          "severity": "UNKNOWN",
+          "gate": 11,
+          "kcs": "7132512"
+        },
+        {
+          "severity": "UNKNOWN",
+          "gate": 15,
+          "kcs": "7141291"
+        },
+        {
+          "severity": "UNKNOWN",
+          "gate": 16,
+          "kcs": "263043"
+        },
+        {
+          "severity": "UNKNOWN",
+          "gate": 13,
+          "kcs": ""
+        }
+      ],
+      "expected_score": 700,
+      "expected_tier": "MEDIUM"
+    }
+  ],
+  "_derivation_note": "Every expected_score/expected_tier here is DERIVED from the scoring model, not chosen by intuition. Two cases in the first draft of this file asserted tiers a human expected rather than tiers the model produces (a lone GENERAL-KNOWLEDGE config FAIL was guessed HIGH but is MEDIUM at 7.0; a KCS-validated driver FAIL plus a cpu WARN was guessed CRITICAL but is HIGH at 21.0). A calibration suite whose numbers are guessed asserts the guesser's model, not the framework's -- so when a case here fails, first confirm which of the two is actually wrong."
+}

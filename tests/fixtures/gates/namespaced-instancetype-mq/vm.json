@@ -1,0 +1,51 @@
+{
+  "apiVersion": "kubevirt.io/v1",
+  "kind": "VirtualMachine",
+  "metadata": {
+    "name": "win10-ns-instancetype-mq",
+    "namespace": "bsod-test",
+    "labels": {
+      "vm.kubevirt.io/os": "win10"
+    },
+    "annotations": {}
+  },
+  "spec": {
+    "instancetype": {
+      "name": "ns-large-mq",
+      "kind": "VirtualMachineInstancetype"
+    },
+    "template": {
+      "metadata": {
+        "annotations": {
+          "vm.kubevirt.io/os": "win10"
+        },
+        "labels": {}
+      },
+      "spec": {
+        "evictionStrategy": "LiveMigrate",
+        "domain": {
+          "devices": {
+            "disks": [
+              {
+                "name": "rootdisk",
+                "bootOrder": 1,
+                "disk": { "bus": "virtio" }
+              },
+              {
+                "name": "datadisk",
+                "disk": { "bus": "virtio" }
+              }
+            ]
+          }
+        },
+        "volumes": [
+          {"name": "rootdisk", "persistentVolumeClaim": {"claimName": "win10-ns-instancetype-mq-rootdisk"}},
+          {"name": "datadisk", "persistentVolumeClaim": {"claimName": "win10-ns-instancetype-mq-datadisk"}},
+          {"name": "virtiocontainerdisk", "containerDisk": {
+            "image": "registry.redhat.io/container-native-virtualization/virtio-win-rhel9@sha256:17b76af03fe7a3f45d63b3e8a9a2ddc3231100619d0e158f73997916580dec68"
+          }}
+        ]
+      }
+    }
+  }
+}

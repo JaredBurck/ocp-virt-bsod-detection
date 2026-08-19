@@ -1,0 +1,110 @@
+{
+  "_description": "Risk scoring and confidence-tier definitions. Single source of truth consumed by the Python analyzer (insights-rules/plugins/risk_scoring.py, plugins/common.py) and the bash gate script (scripts/lib/risk-scoring.sh). Cross-layer agreement is enforced by shared/risk-tier-test-vectors.json.",
+  "_why": "Before v0.15.0 the bash gate used a count-based risk_tier() ('approximates the Python thresholds') while Python used weighted scoring. Measured against identical finding sets they disagreed on 3 of 4 representative cases, in BOTH directions -- e.g. 3 KCS-validated WARNs across cpu+driver+storage scored LOW in bash and HIGH in Python. Both layers print the same CRITICAL/HIGH/MEDIUM/LOW vocabulary to operators, so the divergence read as a contradiction rather than a documented approximation. Layer 4 (bash) is customer-facing; Layer 2 (Python) is Red Hat-only, so a customer could be shown LOW for a VM Red Hat later called HIGH.",
+  "_integer_math_note": "Every weight below is exact to two decimal places so the bash layer can use pure integer arithmetic: values are multiplied by 100 (see *_x100 fields) and the product divided by 10000. Rank decay is a right-shift. Keep the float and _x100 forms in sync -- risk-tier-test-vectors.json will catch drift.",
+  "severity_weights": {
+    "FAIL": 10,
+    "WARN": 3,
+    "UNKNOWN": 0,
+    "PASS": 0
+  },
+  "severity_weights_x100": {
+    "FAIL": 1000,
+    "WARN": 300,
+    "UNKNOWN": 0,
+    "PASS": 0
+  },
+  "domain_weights": {
+    "crash": 3.0,
+    "cpu": 2.0,
+    "storage": 1.5,
+    "driver": 1.5,
+    "migration": 1.5,
+    "template": 1.2,
+    "preference": 1.2,
+    "instancetype": 1.0,
+    "config": 1.0,
+    "resource": 1.0,
+    "coverage": 1.0,
+    "platform": 0.0
+  },
+  "domain_weights_x100": {
+    "crash": 300,
+    "cpu": 200,
+    "storage": 150,
+    "driver": 150,
+    "migration": 150,
+    "template": 120,
+    "preference": 120,
+    "instancetype": 100,
+    "config": 100,
+    "resource": 100,
+    "coverage": 100,
+    "platform": 0
+  },
+  "confidence_multipliers": {
+    "KCS-VALIDATED": 1.0,
+    "GENERAL-KNOWLEDGE": 0.7,
+    "UNVALIDATED": 0.5
+  },
+  "confidence_multipliers_x100": {
+    "KCS-VALIDATED": 100,
+    "GENERAL-KNOWLEDGE": 70,
+    "UNVALIDATED": 50
+  },
+  "tier_thresholds": {
+    "CRITICAL": 30.0,
+    "HIGH": 15.0,
+    "MEDIUM": 5.0
+  },
+  "tier_thresholds_x100": {
+    "CRITICAL": 3000,
+    "HIGH": 1500,
+    "MEDIUM": 500
+  },
+  "domain_rank_decay": 0.5,
+  "_domain_rank_decay_note": "Nth-ranked finding within one domain for one VM is halved per rank (rank 0 = full weight). Multiple findings in a domain usually share one root cause (e.g. BSOD_DRIVER_VERSION + BSOD_STORAGE_MULTIQUEUE both from one outdated virtio-win package), so summing at full weight would multiply-count it. Implemented as integer right-shift in bash.",
+  "kcs_trigger_articles": [
+    "7132511",
+    "7125237",
+    "7132512",
+    "7136486",
+    "7132519",
+    "7141291",
+    "7141988",
+    "7129650",
+    "7141237",
+    "263043",
+    "4234591"
+  ],
+  "_kcs_trigger_note": "L-2: only these KCS articles confirm a specific BSOD TRIGGER and therefore justify KCS-VALIDATED confidence. Utility/collection KCS (7128506) and process KCS (7129390) are deliberately excluded -- 'how to collect data' is not 'this causes a BSOD'. Previously bash assigned KCS-VALIDATED for ANY non-empty kcs while Python restricted it to this list; the two layers encoded different rules for the same tier. 4234591 ('Certified Guest Operating Systems in OpenShift Virtualization', N-06/R-47) added Wave 7 -- it does not describe a crash mechanism the way the others do, but it IS the direct Red Hat authority for check_virtio_win_os_compatibility's BSOD_DRIVER_OS_INCOMPATIBLE verdict: running an OS Red Hat does not certify for OpenShift Virtualization at all is itself the trigger condition that check reports.",
+  "default_confidence": "GENERAL-KNOWLEDGE",
+  "gate_domains": {
+    "0": "config",
+    "1": "migration",
+    "2": "migration",
+    "3": "driver",
+    "4": "cpu",
+    "5": "config",
+    "6": "config",
+    "7": "config",
+    "8": "cpu",
+    "9": "cpu",
+    "10": "storage",
+    "11": "storage",
+    "12": "cpu",
+    "13": "config",
+    "14": "resource",
+    "15": "driver",
+    "16": "migration",
+    "17": "template",
+    "18": "instancetype",
+    "19": "preference",
+    "20": "coverage",
+    "21": "driver",
+    "22": "platform"
+  },
+  "_gate_domains_note": "Maps each bash gate number to the same domain vocabulary risk_scoring.py's _detect_domain() derives from rule_id prefixes, so both layers weight equivalent findings identically. Gate 0 is the catch-all used for pre-gate errors. Gate 20's 'coverage' domain carries the lowest weight (1.0) on purpose: a coverage finding says 'this VM is not being watched', not 'this VM is at risk of a BSOD'. It must be visible, but it must not inflate a VM's risk tier as though a trigger had been found.\n\nGate 22 (F-03) is a SCORING SUB-VERDICT of Gate 15, not a gate an operator can select. It has no GATE_STOP_CODES entry and no `info \"-- Gate 22\"` header, so `gate_enabled` never consults it (its enablement is Gate 15's own guard) and validate-doc-counts.py -- which derives the gate count from those headers -- still reports 21 gates. It exists solely because bash derives a finding's domain from its GATE NUMBER while Python derives it from the rule_id, so a gate number is the only carrier bash has for 'score this one differently'. validate-shared-thresholds.py's check_gate_domains_complete greps `set_gate (\\d+)` and fails CI if a gate lacks a domain here, which is what keeps the two layers from drifting.",
+  "_why_unknown_is_zero": "R-21 (v0.19.0 unified review U-18). UNKNOWN previously scored 2 -- deliberately, on the reasoning that 'we could not determine whether this VM carries a KCS-confirmed trigger' is itself a migration-planning risk. Measured against real clusters that reasoning produced a tier with no discriminative power: 59 of 59 VMs across two clusters scored HIGH, including every reference-good VM, and LOW was arithmetically unreachable. The cause is structural, not a weighting accident -- Gates 15 and 16 are UNKNOWN BY DESIGN on any cluster-only run (the cluster API cannot read in-guest drivers, as CLAUDE.md states plainly), so every VM carried a fixed +600 floor for the framework's own documented blind spot. A tier that cannot vary carries no triage information, which is the entire purpose of a tier. UNKNOWN now scores 0 and evidence completeness is reported as its OWN axis (evidence_completeness / evidence_pct), so 'we do not know' and 'this is risky' are two numbers instead of one conflated one. This does NOT weaken the UNKNOWN contract: unassessed checks are still counted, still surfaced in the UNASSESSED section, still block under --fail-on-unknown, and a LOW tier is never reported without its evidence percentage attached.",
+  "_platform_domain_note": "F-03 (v0.25.0 peer review). Weight 0, and deliberately so -- this is the exact structural remedy R-21 applied to UNKNOWN, for the same arithmetic pathology.\n\ncheck_virtio_win_version's 'at stream max' branch fires when a guest's virtio-win package is at the newest version its HOST STREAM ships. On el8_6/el9_2/el9_4 (OCP 4.12-4.18) those ceilings (1.9.24/1.9.34/1.9.46) all sit below the multiqueue fix (1.9.53) and the VGA-dump fix (1.9.57), so on those streams the check has exactly ONE reachable outcome: WARN. Neither PASS nor FAIL is attainable at any driver version -- verified by exhaustive sweep over 1.0.0-1.11.59.\n\nThe verdict is clinically correct: such a customer genuinely carries unmitigated, KCS-documented BSOD exposure that no driver update can remove. The problem is that it scored 4.50 (WARN 3 x driver 1.5 x KCS-VALIDATED 1.0) against a MEDIUM threshold of 5.00, IDENTICALLY on every Windows VM in the fleet, and is unremediable at VM level -- the only action is a cluster-wide OCP upgrade. That consumed 90% of the LOW->MEDIUM budget uniformly, which does not rank a fleet; it shifts the whole distribution and compresses the discriminative range. Exactly what R-21 found when UNKNOWN scored 2 and 59 of 59 VMs came out HIGH: 'a tier that cannot vary carries no triage information.'\n\nScoring it 0 does NOT hide it. The finding is still counted in warn_count, still listed in the findings output, and still promoted into the CLUSTER-WIDE RISKS section by analyze.py's CLUSTER_WIDE_THRESHOLD grouping -- which is the honest place for it, because it IS a property of the cluster's OCP version rather than of any one VM.\n\nWhy 0 and not the coverage weight (1.0), which was the first proposal: measured against the production scorer, re-domaining to coverage INCREASES the total for any VM with a second driver finding, because leaving the driver domain promotes the survivors from rank 1 (half weight) to rank 0 while the ceiling still contributes 3.0 elsewhere. Ceiling+OS-incompatible went 6.75 -> 7.50. At weight 0 the same case goes 6.75 -> 4.50, decreasing monotonically as intended."
+}

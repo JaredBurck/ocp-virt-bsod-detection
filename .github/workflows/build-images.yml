@@ -1,0 +1,38 @@
+name: Build images
+
+# COPY-source validation only. GitLab remains the only publisher of
+# quay.io/jburck/*. A full buildah build needs registry.redhat.io credentials
+# that this public repo does not have; customers build locally from
+# Dockerfile.gate / Dockerfile.gate-exporter.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate-dockerfile-copies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Validate Dockerfile COPY sources
+        run: |
+          pip install -q pyyaml pytest
+          python3 -m pytest scripts/ci/test_validate_gate_dockerfile_copies.py -v
+          python3 scripts/ci/validate-gate-dockerfile-copies.py
+          python3 scripts/ci/validate-gate-dockerfile-copies.py Dockerfile.gate-exporter
+          python3 <<'PYEOF'
+          import yaml
+          for f in ['tekton/rbac.yaml', 'tekton/bsod-gate-task.yaml',
+                    'tekton/bsod-gate-pipeline.yaml', 'tekton/bsod-gate-prehook-job.yaml',
+                    'exporter/service-account.yaml', 'exporter/deployment.yaml',
+                    'exporter/service.yaml', 'exporter/servicemonitor.yaml']:
+              with open(f) as fh:
+                  docs = list(yaml.safe_load_all(fh))
+              kinds = [d['kind'] for d in docs if d]
+              print(f'{f}: OK ({kinds})')
+          PYEOF

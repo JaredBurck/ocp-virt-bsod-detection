@@ -1,0 +1,23 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "instancetype.kubevirt.io/v1beta1",
+      "kind": "VirtualMachineInstancetype",
+      "metadata": {
+        "name": "ns-large-mq",
+        "namespace": "bsod-test",
+        "labels": {}
+      },
+      "spec": {
+        "cpu": {
+          "guest": 4
+        },
+        "memory": {
+          "guest": "16Gi"
+        }
+      }
+    }
+  ]
+}

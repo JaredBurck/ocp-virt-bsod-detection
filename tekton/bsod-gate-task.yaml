@@ -1,0 +1,135 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: bsod-audit-gate
+  namespace: openshift-cnv
+  labels:
+    app.kubernetes.io/component: bsod-detection
+    app.kubernetes.io/part-of: bsod-gate
+  annotations:
+    tekton.dev/displayName: "BSOD Risk Gate"
+    tekton.dev/categories: "Security, Migration"
+    tekton.dev/tags: "openshift-virtualization,windows,bsod,migration"
+spec:
+  description: |
+    Runs the Windows BSOD risk gate audit against all VMs in an MTV
+    (Migration Toolkit for Virtualization) Plan. Blocks migration if
+    any VM has a hard FAIL condition (e.g. non-virtio disk, missing
+    HyperV enlightenments, known-bad driver version).
+  params:
+    - name: plan-name
+      type: string
+      description: "Name of the MTV Plan to audit"
+    - name: plan-namespace
+      type: string
+      description: "Namespace of the MTV Plan"
+      default: "openshift-mtv"
+    - name: strict
+      type: string
+      description: "Enable strict mode (promotes select WARNs to FAILs)"
+      default: "true"
+  results:
+    - name: verdict
+      description: "Overall gate verdict: PASS, WARN, or FAIL"
+    - name: fail-count
+      description: "Number of VMs with FAIL status"
+    - name: warn-count
+      description: "Number of VMs with WARN status"
+    # I2: exposed so a consumer reading only the numeric Results cannot
+    # mistake an all-UNASSESSED plan for a clean one. `verdict` already
+    # demotes UNASSESSED to WARN and never to PASS, so the gating itself was
+    # never unsafe -- but a dashboard charting fail-count/warn-count in
+    # isolation would have shown "0 / 0" for a plan where nothing was
+    # actually assessed.
+    - name: unassessed-count
+      description: "Number of VMs whose checks could not be evaluated (UNKNOWN evidence)"
+    - name: report-json
+      description: "Full JSON report from the plan gate"
+  # N24 (v0.16.0 #24): explicit, minimal defense-in-depth hardening. Current
+  # RBAC already makes this step non-exploitable (bsod-gate-sa can only read
+  # VM/VMI/node/template objects -- see tekton/rbac.yaml), but an explicit
+  # restricted securityContext costs nothing and satisfies policy scanners
+  # that only check the manifest, not the SCC actually enforced at
+  # admission. readOnlyRootFilesystem is paired with an emptyDir at /tmp
+  # (HOME is pointed there too) since the step writes $JSON_FILE and `oc`
+  # itself wants a writable HOME for its discovery cache.
+  stepTemplate:
+    securityContext:
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop: ["ALL"]
+      seccompProfile:
+        type: RuntimeDefault
+    volumeMounts:
+      - name: tmp
+        mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+  steps:
+    - name: run-gate
+      image: quay.io/jburck/tekton-bsod-gate:v0.27.1
+      timeout: 30m
+      # R-04 (v0.19.0 unified review U-12): every user-controlled param is
+      # passed as an ENV VAR and referenced as "$NAME" inside the script.
+      #
+      # Tekton substitutes $(params.*) into the script TEXT before bash ever
+      # parses it, so quoting in this YAML provides no protection -- a
+      # plan-name of `a'; id; #` was injected verbatim as shell. Params are
+      # unconstrained `string` type, and while the ServiceAccount is read-only
+      # (get/list, no Secrets), it is cluster-scoped across VMs/VMIs/nodes/
+      # HCO/templates/plans, so injection yields cross-namespace read.
+      #
+      # Env-var VALUES are not shell-parsed, which is what makes this safe.
+      # bsod-gate-prehook-job.yaml already used this pattern; the Task did not.
+      # Enforced by scripts/ci/validate-tekton-param-interpolation.py.
+      env:
+        - name: BSOD_SKIP_MICROCODE_PROBE
+          value: "1"
+        - name: BSOD_STRICT
+          value: "$(params.strict)"
+        - name: PLAN_NAME
+          value: "$(params.plan-name)"
+        - name: PLAN_NAMESPACE
+          value: "$(params.plan-namespace)"
+        - name: HOME
+          value: "/tmp"
+      script: |
+        #!/usr/bin/env bash
+        set -uo pipefail
+
+        JSON_FILE="/tmp/gate-report.json"
+        STRICT_ARG=""
+        if [ "$BSOD_STRICT" = "true" ]; then
+          STRICT_ARG="--strict"
+        fi
+
+        /scripts/cnv-mtv-plan-gate.sh \
+          "$PLAN_NAME" \
+          "$PLAN_NAMESPACE" \
+          $STRICT_ARG \
+          --json "$JSON_FILE"
+        rc=$?
+
+        if [ -f "$JSON_FILE" ]; then
+          verdict=$(jq -r '.verdict' "$JSON_FILE")
+          fail_count=$(jq -r '.totals.fail' "$JSON_FILE")
+          warn_count=$(jq -r '.totals.warn' "$JSON_FILE")
+          unassessed_count=$(jq -r '.totals.unassessed // 0' "$JSON_FILE")
+
+          printf '%s' "$verdict" > "$(results.verdict.path)"
+          printf '%s' "$fail_count" > "$(results.fail-count.path)"
+          printf '%s' "$warn_count" > "$(results.warn-count.path)"
+          printf '%s' "$unassessed_count" > "$(results.unassessed-count.path)"
+          cat "$JSON_FILE" > "$(results.report-json.path)"
+        else
+          printf 'FAIL' > "$(results.verdict.path)"
+          printf '0' > "$(results.fail-count.path)"
+          printf '0' > "$(results.warn-count.path)"
+          printf '0' > "$(results.unassessed-count.path)"
+          printf '{"error": "gate script did not produce JSON output"}' > "$(results.report-json.path)"
+        fi
+
+        exit $rc

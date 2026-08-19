@@ -1,0 +1,45 @@
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "worker-1",
+        "labels": {
+          "node-role.kubernetes.io/worker": "",
+          "kubernetes.io/hostname": "worker-1",
+          "cpu-vendor.node.kubevirt.io/Intel": "true",
+          "cpu-timer.node.kubevirt.io/tsc-frequency": "2793514000",
+          "cpu-timer.node.kubevirt.io/tsc-scalable": "true",
+          "scheduling.node.kubevirt.io/tsc-frequency-2793438000": "true",
+          "scheduling.node.kubevirt.io/tsc-frequency-2793514000": "true"
+        }
+      }
+    },
+    {
+      "metadata": {
+        "name": "worker-2",
+        "labels": {
+          "node-role.kubernetes.io/worker": "",
+          "kubernetes.io/hostname": "worker-2",
+          "cpu-vendor.node.kubevirt.io/Intel": "true",
+          "cpu-timer.node.kubevirt.io/tsc-frequency": "2793438000",
+          "cpu-timer.node.kubevirt.io/tsc-scalable": "true",
+          "scheduling.node.kubevirt.io/tsc-frequency-2793438000": "true"
+        }
+      }
+    },
+    {
+      "metadata": {
+        "name": "worker-3",
+        "labels": {
+          "node-role.kubernetes.io/worker": "",
+          "kubernetes.io/hostname": "worker-3",
+          "cpu-vendor.node.kubevirt.io/Intel": "true",
+          "cpu-timer.node.kubevirt.io/tsc-frequency": "2793439000",
+          "cpu-timer.node.kubevirt.io/tsc-scalable": "true",
+          "scheduling.node.kubevirt.io/tsc-frequency-2793438000": "true",
+          "scheduling.node.kubevirt.io/tsc-frequency-2793439000": "true"
+        }
+      }
+    }
+  ]
+}

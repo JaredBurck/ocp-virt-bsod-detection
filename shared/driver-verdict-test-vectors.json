@@ -1,0 +1,326 @@
+{
+  "_description": "Cross-layer test vectors for driver version verdict. All three layers (Python, bash, PowerShell) must produce identical verdicts for each vector. R-01 (v0.19.0): malformed/sentinel inputs are included deliberately -- the bash layer previously graded every non-numeric-leading string as PASS while Python returned WARN, and a well-formed-only vector set let that cross-layer divergence pass CI.",
+  "vectors": [
+    {
+      "version": "",
+      "stream": "el9_6",
+      "expected": "WARN",
+      "note": "empty/missing version"
+    },
+    {
+      "version": "1.9.57",
+      "stream": "el9_6",
+      "expected": "PASS",
+      "note": "at remediation baseline on current stream"
+    },
+    {
+      "version": "1.9.58",
+      "stream": "el9_6",
+      "expected": "PASS",
+      "note": "above baseline"
+    },
+    {
+      "version": "1.9.53",
+      "stream": "el9_6",
+      "expected": "WARN",
+      "note": "above fail, below warn"
+    },
+    {
+      "version": "1.9.46",
+      "stream": "el9_6",
+      "expected": "FAIL",
+      "note": "below stream fail (1.9.53)"
+    },
+    {
+      "version": "1.9.30",
+      "stream": "el9_6",
+      "expected": "FAIL",
+      "note": "below both stream fail and tooling floor"
+    },
+    {
+      "version": "1.9.30",
+      "stream": "el9_4",
+      "expected": "WARN",
+      "note": "below tooling floor on capped stream (H-2: WARN not FAIL)"
+    },
+    {
+      "version": "1.9.46",
+      "stream": "el9_4",
+      "expected": "WARN",
+      "note": "at stream max for el9_4"
+    },
+    {
+      "version": "1.9.40",
+      "stream": "el9_4",
+      "expected": "WARN",
+      "note": "below tooling floor on capped stream (H-2: WARN not FAIL)"
+    },
+    {
+      "version": "1.9.22",
+      "stream": "el8_6",
+      "expected": "WARN",
+      "note": "below tooling floor on capped stream (H-2: WARN not FAIL)"
+    },
+    {
+      "version": "1.9.24",
+      "stream": "el8_6",
+      "expected": "WARN",
+      "note": "at stream max for el8_6"
+    },
+    {
+      "version": "1.9.30",
+      "stream": "el9_2",
+      "expected": "WARN",
+      "note": "below tooling floor on capped stream (H-2: WARN not FAIL)"
+    },
+    {
+      "version": "1.9.34",
+      "stream": "el9_2",
+      "expected": "WARN",
+      "note": "at stream max for el9_2"
+    },
+    {
+      "version": "1.9.49",
+      "stream": "el10_1",
+      "expected": "FAIL",
+      "note": "below el10_1 fail (1.9.53)"
+    },
+    {
+      "version": "1.9.52",
+      "stream": "el10_1",
+      "expected": "FAIL",
+      "note": "R-05: below el10_1 fail (1.9.53). This vector previously expected WARN, encoding the el10_1.fail=1.9.52 regression -- 1.9.52 lacks the KCS-7136486 multiqueue fix, so it must FAIL on every stream that has a fail floor at all"
+    },
+    {
+      "version": "1.9.57",
+      "stream": "el10_1",
+      "expected": "PASS",
+      "note": "at remediation baseline on el10_1"
+    },
+    {
+      "version": "1.9.54",
+      "stream": "el9_6",
+      "expected": "WARN",
+      "note": "above stream fail, below stream warn (remediation baseline gap)"
+    },
+    {
+      "version": "1.9.41-1",
+      "stream": "el9_6",
+      "expected": "FAIL",
+      "note": "RPM release suffix must be stripped before parse (not 1.9.411)"
+    },
+    {
+      "version": "1.9.57-2.el9",
+      "stream": "el9_6",
+      "expected": "PASS",
+      "note": "RPM NVR suffix (1.9.57 after strip)"
+    },
+    {
+      "version": "1.9.53-1.el9_6",
+      "stream": "el9_6",
+      "expected": "WARN",
+      "note": "RPM NVR with dist tag"
+    },
+    {
+      "version": "100.85.104.20700",
+      "stream": "el9_6",
+      "expected": "WARN",
+      "note": "binary-format DriverVersion (Win32_PnPSignedDriver, RHBZ#1998933) must never silently PASS"
+    },
+    {
+      "version": "100.95.104.24200",
+      "stream": "el10_1",
+      "expected": "WARN",
+      "note": "binary-format DriverVersion on el10_1 (highest thresholds) -- guard must still catch it"
+    },
+    {
+      "version": "100.85.104.20700",
+      "stream": "el8_6",
+      "expected": "WARN",
+      "note": "binary-format DriverVersion on a capped stream must still WARN, not PASS or FAIL"
+    },
+    {
+      "version": "N/A",
+      "stream": "el9_6",
+      "expected": "WARN",
+      "note": "R-01: sentinel from a collector that could not determine the version -- must never PASS"
+    },
+    {
+      "version": "unknown",
+      "stream": "el9_6",
+      "expected": "WARN",
+      "note": "R-01: sentinel -- must never PASS"
+    },
+    {
+      "version": "virtio-win-1.9.20",
+      "stream": "el9_6",
+      "expected": "WARN",
+      "note": "R-01: package-name-prefixed string; sort -V ranks it above every real version, so it graded PASS before the format anchor"
+    },
+    {
+      "version": "virtio-win-1.9.53",
+      "stream": "el9_6",
+      "expected": "WARN",
+      "note": "R-01: prefixed form of a version that would otherwise WARN -- identity unconfirmed, so WARN for the parse failure, not the threshold"
+    },
+    {
+      "version": "v1.9.20",
+      "stream": "el9_6",
+      "expected": "WARN",
+      "note": "R-01: 'v' prefix -- non-numeric leading char defeats sort -V ordering"
+    },
+    {
+      "version": "2",
+      "stream": "el9_6",
+      "expected": "WARN",
+      "note": "R-01: bare major -- insufficient precision to grade against an x.y.z threshold"
+    },
+    {
+      "version": "1.9.",
+      "stream": "el9_6",
+      "expected": "WARN",
+      "note": "R-01: trailing dot -- malformed"
+    },
+    {
+      "version": ".1.9",
+      "stream": "el9_6",
+      "expected": "WARN",
+      "note": "R-01: leading dot -- malformed"
+    },
+    {
+      "version": "1..9",
+      "stream": "el9_6",
+      "expected": "WARN",
+      "note": "R-01: empty component -- malformed"
+    },
+    {
+      "version": "1.9.52",
+      "stream": "el9_6",
+      "expected": "FAIL",
+      "note": "R-05: below el9_6 fail (1.9.53) -- pairs with the el10_1 vector to pin identical grading across streams"
+    }
+  ],
+  "_os_compat_vectors_description": "N-06 (Wave 7, R-47): a SEPARATE axis from `vectors` above -- evaluate_guest_os_driver_compatibility (bash) / Get-GuestOSDriverCompatibility (PowerShell) / check_virtio_win_os_compatibility (Python), all consuming shared/virtio-win-guest-os-support.json. Keyed by (os_hint, driver_version) rather than (version, stream) because this axis has no host-stream concept at all -- deliberately a new key in this same file rather than retrofitting `vectors`' schema, which the three existing harnesses already consume in a form with no os_hint field. Every INCOMPATIBLE expectation below is now grounded in KCS 4234591 ('Certified Guest Operating Systems in OpenShift Virtualization') rather than driver-archaeology inference alone -- see shared/virtio-win-guest-os-support.json's _kcs_4234591 field.",
+  "os_compat_vectors": [
+    {
+      "os_hint": "winxp",
+      "version": "1.9.57",
+      "expected": "INCOMPATIBLE",
+      "note": "XP: KCS 4234591 'Known to work' tier + EOL footnote (not Certified) -- fires regardless of the specific (even a current, otherwise-PASS) version reported"
+    },
+    {
+      "os_hint": "legacy-winxp-vm",
+      "version": "",
+      "expected": "INCOMPATIBLE",
+      "note": "'winxp' substring match within a longer free-form os_hint string, and fires even with NO driver version evidence at all -- the incompatibility is intrinsic to the OS, not the reported number"
+    },
+    {
+      "os_hint": "win2k3",
+      "version": "1.9.24",
+      "expected": "INCOMPATIBLE",
+      "note": "Server 2003: KCS 4234591 'Known to work' tier + EOL footnote"
+    },
+    {
+      "os_hint": "win2k8",
+      "version": "1.9.57",
+      "expected": "INCOMPATIBLE",
+      "note": "Server 2008 (and R2): KCS 4234591 'Known to work' tier + EOL footnote"
+    },
+    {
+      "os_hint": "win2k12",
+      "version": "1.9.57",
+      "expected": "INCOMPATIBLE",
+      "note": "Server 2012 (and R2): KCS 4234591 'Known to work' tier + EOL footnote -- fires even though the article notes 2012 R2 has MTV Status 'Blue' (migrated VMs run), since 'runs' is not the same as 'Certified/supported'"
+    },
+    {
+      "os_hint": "win7",
+      "version": "1.9.20",
+      "expected": "INCOMPATIBLE",
+      "note": "Windows 7: KCS 4234591 'Known to work' tier + EOL footnote settles this independently of the driver-version ceiling this file could not establish on its own (superseded the earlier CEILING_NOT_YET_ESTABLISHED placeholder) -- fires even for a version that would otherwise PASS on the ordinary stream axis"
+    },
+    {
+      "os_hint": "win8",
+      "version": "1.9.57",
+      "expected": "INCOMPATIBLE",
+      "note": "Windows 8: absent from ALL FOUR of KCS 4234591's support tiers (weaker than even 'Known to work') -- fires even at the current remediation baseline version"
+    },
+    {
+      "os_hint": "win81",
+      "version": "1.9.57",
+      "expected": "INCOMPATIBLE",
+      "note": "Windows 8.1: same as win8 -- absent from KCS 4234591 entirely; also proves win81 is matched distinctly from win8 (both contain the substring 'win8'), not swallowed by win8's negative-lookahead pattern"
+    },
+    {
+      "os_hint": "win10",
+      "version": "1.9.20",
+      "expected": "",
+      "note": "Windows 10: still Certified per KCS 4234591 as of this writing (even though Microsoft's own consumer support lapsed 2025-10-14 -- see the shared JSON's _known_gaps) -- must not fire regardless of driver version (this axis defers to Red Hat's own certification matrix, not Microsoft's lifecycle dates, for currently-Certified OSes)"
+    },
+    {
+      "os_hint": "win2k22",
+      "version": "1.9.10",
+      "expected": "",
+      "note": "Windows Server 2022: Certified per KCS 4234591 -- must not fire even for a driver version far below any stream threshold (that is check_virtio_win_version's job, not this axis's)"
+    },
+    {
+      "os_hint": "",
+      "version": "1.9.57",
+      "expected": "",
+      "note": "empty os_hint -- unknown/uncollected OS metadata must not fire this check (fail-silent, not fail-open into a false INCOMPATIBLE)"
+    },
+    {
+      "os_hint": "Microsoft Windows XP Professional",
+      "version": "",
+      "expected": "INCOMPATIBLE",
+      "note": "Win32_OperatingSystem.Caption long-form string (collect-windows-guest-info.ps1's guest-local input, distinct from the terse cluster-side os_hint convention above) -- must match the same as the terse 'winxp' token per _match_pattern_inputs"
+    },
+    {
+      "os_hint": "Microsoft(R) Windows(R) Server 2003, Standard Edition",
+      "version": "1.9.57",
+      "expected": "INCOMPATIBLE",
+      "note": "Caption long-form with interposed '(R)' trademark symbols (a real quirk of legacy Windows Server 2003/XP-era Captions) -- proves the bounded '.{0,N}' filler in match_pattern tolerates it"
+    },
+    {
+      "os_hint": "Microsoft Windows Server 2008 R2 Standard",
+      "version": "1.9.57",
+      "expected": "INCOMPATIBLE",
+      "note": "Caption long-form, Server 2008 R2 (no trademark symbols in this Caption vintage)"
+    },
+    {
+      "os_hint": "Microsoft Windows Server 2012 R2 Standard",
+      "version": "1.9.57",
+      "expected": "INCOMPATIBLE",
+      "note": "Caption long-form, Server 2012 R2"
+    },
+    {
+      "os_hint": "Microsoft Windows 7 Professional",
+      "version": "1.9.57",
+      "expected": "INCOMPATIBLE",
+      "note": "Caption long-form, Windows 7 -- proves 'windows\\s?7(?!\\d)' matches the space-separated Caption form, not just the terse 'win7' token"
+    },
+    {
+      "os_hint": "Microsoft Windows 8 Pro",
+      "version": "1.9.57",
+      "expected": "INCOMPATIBLE",
+      "note": "Caption long-form, Windows 8"
+    },
+    {
+      "os_hint": "Microsoft Windows 8.1 Pro",
+      "version": "1.9.57",
+      "expected": "INCOMPATIBLE",
+      "note": "Caption long-form, Windows 8.1 -- proves 'windows\\s?8\\.1' is matched distinctly from plain 'windows\\s?8', mirroring the terse win8/win81 disambiguation"
+    },
+    {
+      "os_hint": "Microsoft Windows 10 Pro",
+      "version": "1.9.20",
+      "expected": "",
+      "note": "Caption long-form, Windows 10 (Certified) -- must not fire, and must not be swallowed by the win7/win8 Caption patterns (e.g. 'Windows 10' contains neither ' 7' nor ' 8' immediately after 'Windows')"
+    },
+    {
+      "os_hint": "Microsoft Windows Server 2022 Datacenter",
+      "version": "1.9.10",
+      "expected": "",
+      "note": "Caption long-form, Server 2022 (Certified) -- must not fire and must not false-positive against the 2003/2008/2012 Caption patterns"
+    }
+  ]
+}

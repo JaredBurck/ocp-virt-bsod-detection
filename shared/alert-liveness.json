@@ -1,0 +1,214 @@
+{
+  "_description": "Per-alert declaration of whether the alert can actually FIRE on a real cluster, and what must be true for its input series to exist. Consumed and enforced by scripts/ci/validate-alert-liveness.py. Source of truth for the question 'is this alert live, or is it silently inert?'",
+  "_why": "Peer-review finding F-02 (v0.25.0). Every one of this framework's alerts already had a promtool test asserting it fires, and BSODRisk_HostCPUContention passed its test while being provably silent at 100% node contention on a default cluster: its cAdvisor CFS counters only exist when a CPU *limit* is set, and KubeVirt sets requests, not limits. A promtool test cannot catch this -- the test author supplies the input series, so it can only ever prove 'given these samples the alert fires', never 'these samples occur in reality'.\n\nThat was the THIRD instance of the class. BSODRisk_GuestCrash (metric never released in any shipping HCO/CNV build) and check_virtio_gpu_dump_capability (API field does not exist) are both already documented in CLAUDE.md as unable to fire on any shipping release, and both were found by hand on a live cluster long after shipping.\n\nWhether a series exists on a real cluster is domain knowledge, not something derivable from this repo. So this file does not compute it -- it requires it to be WRITTEN DOWN and reviewed, per alert. Same doctrine as shared/audit-consumers.json: 'A flag default cannot prevent that; an enumeration can.' Adding an alert now fails CI until its liveness is declared, which forces 'can this actually fire?' to be answered on the way in.",
+  "_status_vocabulary": {
+    "default-cluster": "Every base metric is present on a stock OCP + CNV cluster with the default monitoring stack. The alert can fire with no operator action.",
+    "requires-optional-component": "Needs a component this framework ships but does not install by default (windows_exporter, the BSOD textfile collector, the fleet exporter). Documented as opt-in; silent until deployed.",
+    "requires-nondefault-config": "Needs a cluster or VM configuration that is NOT the KubeVirt default. Silent on a default cluster EVEN WHEN THE UNDERLYING RISK IS PRESENT -- this is the F-02 class and the most dangerous of the four, because silence reads as safety.",
+    "known-inert": "Cannot fire on any currently shipping release. Ships as a forward-looking placeholder only, and must never be presented to an operator as working detection."
+  },
+  "_required_series_note": "Base metrics the alert depends on, resolved THROUGH any bsod: recording rule it references -- a recording rule is only as live as its own inputs, so the KubeVirt/cAdvisor counters underneath are what the liveness claim is really about. Cross-checked against the alert's real expr by the validator, so an expression that grows a new dependency fails CI until this list and the status are re-confirmed. That is what stops this file rotting into a stale assertion.",
+  "alerts": {
+    "BSODRisk_StorageLatencyElevated": {
+      "status": "default-cluster",
+      "required_series": [
+        "kubevirt_vmi_storage_iops_read_total",
+        "kubevirt_vmi_storage_iops_write_total",
+        "kubevirt_vmi_storage_read_times_seconds_total",
+        "kubevirt_vmi_storage_write_times_seconds_total"
+      ],
+      "precondition": "",
+      "note": "KubeVirt emits per-VMI storage counters unconditionally for any running VMI with a disk. Requires the bsod-risk-recording-rules PrometheusRule to be deployed alongside the alerts CR -- both ship together and the alert annotation says so. Extended to the WRITE path in v0.26.0 (F-01): the alert now consumes bsod:vmi_disk_latency:worst_1h, the max of the read and write twins, so a write-only degradation can no longer pass unnoticed. The write counters are emitted by KubeVirt on exactly the same terms as the read counters, so the default-cluster status is unchanged."
+    },
+    "BSODRisk_StorageLatencyHigh": {
+      "status": "default-cluster",
+      "required_series": [
+        "kubevirt_vmi_storage_iops_read_total",
+        "kubevirt_vmi_storage_iops_write_total",
+        "kubevirt_vmi_storage_read_times_seconds_total",
+        "kubevirt_vmi_storage_write_times_seconds_total"
+      ],
+      "precondition": "",
+      "note": "Same recording-rule dependency as BSODRisk_StorageLatencyElevated. Extended to the WRITE path in v0.26.0 (F-01): the alert now consumes bsod:vmi_disk_latency:worst_1h, the max of the read and write twins, so a write-only degradation can no longer pass unnoticed. The write counters are emitted by KubeVirt on exactly the same terms as the read counters, so the default-cluster status is unchanged."
+    },
+    "BSODRisk_StorageLatencyBurst": {
+      "status": "default-cluster",
+      "required_series": [
+        "kubevirt_vmi_storage_iops_read_total",
+        "kubevirt_vmi_storage_iops_write_total",
+        "kubevirt_vmi_storage_read_times_seconds_total",
+        "kubevirt_vmi_storage_write_times_seconds_total"
+      ],
+      "precondition": "",
+      "note": "Computes its own subquery inline rather than via a recording rule, so it depends only on the raw KubeVirt counters. Extended to the WRITE path in v0.26.0 (F-01): the alert now consumes bsod:vmi_disk_latency:worst_1h, the max of the read and write twins, so a write-only degradation can no longer pass unnoticed. The write counters are emitted by KubeVirt on exactly the same terms as the read counters, so the default-cluster status is unchanged."
+    },
+    "BSODRisk_MemoryPressure": {
+      "status": "default-cluster",
+      "required_series": [
+        "kubevirt_vmi_info",
+        "kubevirt_vmi_memory_domain_bytes",
+        "kubevirt_vmi_memory_used_bytes"
+      ],
+      "precondition": "",
+      "note": "kubevirt_vmi_memory_used_bytes is reported by the guest balloon/QGA path; a VMI with no guest agent can report a stale or absent value, but the series itself exists for any running VMI. The `os=~\"windows|win.*\"` selector depends on the VMI carrying an os label, which KubeVirt sets from the VM's os annotation."
+    },
+    "BSODRisk_GuestCrash": {
+      "status": "known-inert",
+      "required_series": [
+        "kubevirt_vmi_guest_os_panic_total"
+      ],
+      "precondition": "kubevirt_vmi_guest_os_panic_total must exist. It was added upstream in kubevirt/kubevirt#17836 but has NOT reached any released HCO/CNV build -- confirmed absent by direct query on live OCP Virt 4.19.25 and CNV 4.21.13. Until a release ships it, this alert cannot fire under any circumstances.",
+      "note": "Ships as a forward-looking placeholder and is labelled bsod_status: preview in the CR. Documented in CLAUDE.md. Use must-gather QMP log analysis (bsod_crashdump_checks.py, which parses GUEST_PANICKED/GUEST_CRASHLOADED from logs) as the working detection path instead."
+    },
+    "BSODRisk_HeterogeneousCPUMigration": {
+      "status": "requires-optional-component",
+      "required_series": [
+        "kube_node_labels",
+        "kubevirt_vmi_migration_phase_transition_time_from_creation_seconds_count"
+      ],
+      "precondition": "kube-state-metrics must expose KubeVirt node labels. On OCP 4.14+ the nodes=[*] allowlist is the default so this works out of the box; on an older release, or where the cluster-monitoring-config has been narrowed, kube_node_labels carries no cpu-feature.node.kubevirt.io/* labels and bsod:cluster_cpu_model_count:gauge falls back to vector(0), which can never exceed 1.",
+      "note": "Classified as requires-optional-component rather than default-cluster because the dependency is on a monitoring-stack configuration that an operator can narrow, and the failure mode is silent (the `or vector(0)` fallback makes the count 0, not an error)."
+    },
+    "BSODRisk_AMDNodeRequiresMicrocodeVerification": {
+      "status": "requires-optional-component",
+      "required_series": [
+        "kube_node_labels"
+      ],
+      "precondition": "Same kube-state-metrics node-label dependency as BSODRisk_HeterogeneousCPUMigration. Additionally the alert fires on the ABSENCE of a label (label_bsod_microcode_verified != true), so it is live by default on any AMD cluster once node labels are exposed and quiets only when an operator labels the node after verifying microcode.",
+      "note": "Note the kube-state-metrics lowercase normalisation: the label is label_cpu_vendor_node_kubevirt_io_amd, not ...AMD. See CLAUDE.md."
+    },
+    "BSODRisk_StorageLatencyTrending": {
+      "status": "default-cluster",
+      "required_series": [
+        "kubevirt_vmi_storage_iops_read_total",
+        "kubevirt_vmi_storage_iops_write_total",
+        "kubevirt_vmi_storage_read_times_seconds_total",
+        "kubevirt_vmi_storage_write_times_seconds_total"
+      ],
+      "precondition": "",
+      "note": "Depends on both the 1h and 24h recording rules; the 24h rule needs 24h of retention before it produces a usable baseline, so this alert is inert for the first day after deployment. That is a startup transient, not a structural gap. Extended to the WRITE path in v0.26.0 (F-01): the alert now consumes bsod:vmi_disk_latency:worst_1h, the max of the read and write twins, so a write-only degradation can no longer pass unnoticed. The write counters are emitted by KubeVirt on exactly the same terms as the read counters, so the default-cluster status is unchanged."
+    },
+    "BSODRisk_EvictionBlocked": {
+      "status": "default-cluster",
+      "required_series": [
+        "kubevirt_vmi_info"
+      ],
+      "precondition": "",
+      "note": "kubevirt_vmi_info carries the evictable label for every running VMI."
+    },
+    "BSODRisk_FleetEvidenceIncomplete": {
+      "status": "requires-optional-component",
+      "required_series": [
+        "bsod_vm_checks_assessed",
+        "bsod_vm_checks_total"
+      ],
+      "precondition": "The BSOD fleet exporter (exporter/deployment.yaml, Dockerfile.gate-exporter) must be deployed and its ServiceMonitor scraped. It is an opt-in add-on, not part of a base install.",
+      "note": "Silent-but-correct when the exporter is absent: no series, no alert, and the absence is itself visible as a missing Prometheus target."
+    },
+    "BSODRisk_ExporterCollectionFailing": {
+      "status": "requires-optional-component",
+      "required_series": [
+        "bsod_evidence_exporter_last_collection_success"
+      ],
+      "precondition": "Same fleet-exporter dependency as BSODRisk_FleetEvidenceIncomplete.",
+      "note": "This is the exporter's own self-report, so it can only fire while the exporter is running well enough to publish a metrics file at all. A crashed exporter is caught by the ServiceMonitor target going down, not by this alert."
+    },
+    "BSODRisk_GuestDiskLatencyHigh": {
+      "status": "requires-optional-component",
+      "required_series": [
+        "windows_logical_disk_read_seconds_total",
+        "windows_logical_disk_reads_total"
+      ],
+      "precondition": "windows_exporter must be installed in the Windows guest and scraped via windows-exporter/servicemonitor-windows-vms.yaml. It is an optional add-on installed per-VM (see scripts/cnv-windows-exporter-fleet-install.ps1).",
+      "note": "Guest-side twin of the hypervisor storage alerts. Like them it is currently READ-PATH ONLY (windows_logical_disk_write_seconds_total / _writes_total are already on the validate-metric-names.py allowlist but unused) -- tracked as peer-review F-01."
+    },
+    "BSODRisk_QGAServiceDown": {
+      "status": "requires-optional-component",
+      "required_series": [
+        "bsod_qga_service_running"
+      ],
+      "precondition": "Requires windows_exporter AND the BSOD textfile collector (windows-exporter/bsod-textfile-collector.ps1) running in the guest -- this metric is emitted by the collector, not by stock windows_exporter.",
+      "note": "The framework's own collector is the only producer of every bsod_* guest metric."
+    },
+    "BSODRisk_PagefilePressure": {
+      "status": "requires-optional-component",
+      "required_series": [
+        "windows_pagefile_free_bytes",
+        "windows_pagefile_limit_bytes"
+      ],
+      "precondition": "windows_exporter installed in the guest with the pagefile collector enabled.",
+      "note": "Stock windows_exporter metrics, so the textfile collector is not required for this one."
+    },
+    "BSODRisk_DriverVersionOutdated": {
+      "status": "requires-optional-component",
+      "required_series": [
+        "bsod_virtio_driver_outdated",
+        "bsod_virtio_package_version"
+      ],
+      "precondition": "Requires windows_exporter AND the BSOD textfile collector in the guest.",
+      "note": "KNOWN TRIAGE CAVEAT (peer-review F-03 family): the collector sets bsod_virtio_driver_outdated=1 for BOTH 'below the stream threshold' and 'at the stream ceiling'. On a capped stream (el8_6/el9_2/el9_4, i.e. OCP 4.12-4.18) every guest is at or below the ceiling, so this alert fires uniformly across the whole fleet with no VM-level remediation available. Correct as a binary signal, but it does not discriminate. Tracked for v0.27.0."
+    },
+    "BSODRisk_LegacyDriverCollectorFallback": {
+      "status": "requires-optional-component",
+      "required_series": [
+        "bsod_virtio_driver_outdated",
+        "bsod_virtio_package_version"
+      ],
+      "precondition": "Requires windows_exporter AND the BSOD textfile collector in the guest.",
+      "note": "Fires when the collector reports a package version it could not resolve from the registry, i.e. it detects a DEGRADED collector rather than a degraded guest."
+    },
+    "BSODRisk_CrashDumpDisabled": {
+      "status": "requires-optional-component",
+      "required_series": [
+        "bsod_crashdump_enabled"
+      ],
+      "precondition": "Requires windows_exporter AND the BSOD textfile collector in the guest.",
+      "note": "Also covered offline by bsod_crashdump_checks.py against must-gather guest evidence, so an operator without windows_exporter is not blind to this -- unlike the CPU/memory saturation pair below."
+    },
+    "BSODRisk_GuestCPUSaturation": {
+      "status": "requires-optional-component",
+      "required_series": [
+        "windows_cpu_time_total"
+      ],
+      "precondition": "windows_exporter installed in the guest. Stock metric; the textfile collector is not required.",
+      "note": "ALERT-ONLY BY DESIGN (R-46): there is deliberately no bsod_resource_checks.py analyzer counterpart, so a customer who never deploys windows_exporter gets ZERO guest CPU-saturation signal from an offline must-gather audit. That is a documented scope boundary, not an oversight -- see the KNOWN LIMITATION comment in alerts/bsod-risk-guest-alerts.yaml."
+    },
+    "BSODRisk_GuestMemorySaturation": {
+      "status": "requires-optional-component",
+      "required_series": [
+        "windows_memory_physical_free_bytes",
+        "windows_memory_physical_total_bytes"
+      ],
+      "precondition": "windows_exporter installed in the guest. Stock metric; the textfile collector is not required.",
+      "note": "Same alert-only-by-design boundary as BSODRisk_GuestCPUSaturation (R-46)."
+    },
+    "BSODRisk_GuestUnexpectedRestart": {
+      "status": "requires-optional-component",
+      "required_series": [
+        "kubevirt_vm_running_status_last_transition_timestamp_seconds",
+        "kubevirt_vmi_info",
+        "up"
+      ],
+      "precondition": "windows_exporter must be installed AND registered as a Prometheus target, because the alert keys on `up{job=~\"bsod-windows-exporter.*\"} == 0`. A VM that never had windows_exporter has no `up` series for that job and therefore cannot trigger this alert -- absence of the target is indistinguishable from absence of the VM.",
+      "note": "The KubeVirt half of the expression (kubevirt_vmi_info, kubevirt_vm_running_status_last_transition_timestamp_seconds) is default-cluster, but the join means the alert is only as live as the guest exporter. This is the closest working substitute for BSODRisk_GuestCrash while that alert remains known-inert."
+    },
+    "BSODRisk_VirtLauncherCPUThrottled": {
+      "status": "requires-nondefault-config",
+      "required_series": [
+        "container_cpu_cfs_periods_total",
+        "container_cpu_cfs_throttled_periods_total"
+      ],
+      "precondition": "virt-launcher pods must have a CPU LIMIT set. cAdvisor populates the CFS period/throttle counters only when the cgroup carries a CPU bandwidth quota, and KubeVirt sets CPU requests -- not limits -- on virt-launcher unless the VM specifies resources.limits.cpu or uses dedicatedCpuPlacement. On a stock cluster both sums are 0 and the alert is correctly silent: there is no quota to exceed, so there is nothing to report.",
+      "note": "This IS the alert that shipped as BSODRisk_HostCPUContention until v0.26.0, renamed under peer-review F-02 to what it actually measures. Two defects drove the rename: it could not fire on a default cluster (proven with promtool -- flat-zero CFS series produce no alert even at 100% contention), and its semantics were inverted (CFS throttling means a pod exceeded its OWN limit; an oversubscribed node with no limits -- the standard overcommit posture -- throttles zero). Under the honest name the remaining silence is correct rather than misleading, and the `and on(node) ... > 0` guard makes the no-quota case explicit instead of a bare NaN. Node contention is now carried by the PSI-based BSODRisk_HostCPUContention.\n\nLIVE CONFIRMATION (2026-08-19, OCP 4.18.26 / CNV 4.18.45): 0 of 64 VMs on that cluster set resources.limits.cpu or dedicatedCpuPlacement, so no virt-launcher pod there would carry a CFS quota and this alert would produce no series at all. cAdvisor exports the counters for 121 other pods on the same cluster, so the metric plumbing is fine -- it is specifically the KubeVirt default that makes this signal unavailable. F-02 observed in the field, not just reasoned about."
+    },
+    "BSODRisk_HostCPUContention": {
+      "status": "default-cluster",
+      "required_series": [
+        "kube_node_labels",
+        "node_schedstat_waiting_seconds_total"
+      ],
+      "precondition": "",
+      "note": "Rebased in v0.26.0 (peer-review F-02) to carry the node-contention signal the CFS-based rule of the same name could not, then CORRECTED before release against a live cluster.\n\nThe first implementation used Linux PSI (node_pressure_cpu_waiting_seconds_total) and was declared requires-optional-component with the precondition 'believed present on RHCOS but NOT confirmed'. Checking that on OCP 4.18.26 / CNV 4.18.45 (ARO) found PSI ABSENT -- zero node_pressure_* series cluster-wide, with node_exporter otherwise healthy. Shipping it would have reproduced F-02 exactly. This entry is the reason it was checked: recording the doubt instead of assuming the series existed is what turned an invisible defect into a pre-release one.\n\nnode_schedstat_waiting_seconds_total is confirmed present (72 series across all 6 nodes) and kube_node_labels carries the KubeVirt cpu-vendor labels, so both dependencies are verified on a real cluster -- hence default-cluster rather than a hedge. The scoping join was verified too: node_exporter's `instance` and kube-state-metrics' `node` both carry the plain node name, so label_replace normalises them and the expression returns exactly the 3 KubeVirt workers out of 6 nodes. That check is what allowed the scoping the PSI version had to omit.\n\nThreshold is PARTIALLY calibrated against a measured 24h baseline -- see shared/host-contention-thresholds.json. Note the units differ from PSI (unbounded tasks-queued-per-CPU, not a 0-1 stall fraction), which is why the threshold is 1.0 and not 0.25."
+    }
+  }
+}
