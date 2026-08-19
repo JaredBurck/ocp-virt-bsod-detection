@@ -1,0 +1,4 @@
+[ OK ] arch-capabilities check passed
+[ OK ] no AMD worker nodes detected
+[ OK ] no Windows templates found
+[ OK ] no cluster preferences found

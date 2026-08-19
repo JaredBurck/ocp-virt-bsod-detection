@@ -1,0 +1,63 @@
+{
+  "apiVersion": "kubevirt.io/v1",
+  "kind": "VirtualMachineInstance",
+  "metadata": {
+    "name": "win2k22-instancetype",
+    "namespace": "bsod-test"
+  },
+  "spec": {
+    "domain": {
+      "machine": {
+        "type": "pc-q35-rhel9.6.0"
+      },
+      "cpu": {
+        "model": "host-model",
+        "cores": 4,
+        "sockets": 1,
+        "threads": 1
+      },
+      "features": {
+        "hyperv": {
+          "relaxed": {},
+          "vapic": {},
+          "spinlocks": {
+            "spinlocks": 8191
+          },
+          "vpindex": {},
+          "synic": {},
+          "synictimer": {},
+          "frequencies": {},
+          "reenlightenment": {},
+          "tlbflush": {},
+          "ipi": {}
+        }
+      },
+      "devices": {
+        "disks": [
+          {
+            "name": "rootdisk",
+            "disk": {
+              "bus": "virtio"
+            },
+            "bootOrder": 1
+          }
+        ],
+        "interfaces": [
+          {
+            "name": "default",
+            "masquerade": {},
+            "model": "virtio"
+          }
+        ]
+      }
+    }
+  },
+  "status": {
+    "conditions": [
+      {
+        "type": "LiveMigratable",
+        "status": "True"
+      }
+    ]
+  }
+}

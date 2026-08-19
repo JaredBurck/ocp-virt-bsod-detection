@@ -1,0 +1,40 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: bsod-windows-exporter
+  namespace: openshift-cnv
+  labels:
+    app.kubernetes.io/component: bsod-detection
+spec:
+  endpoints:
+    - port: windows-exporter
+      interval: 60s
+      path: /metrics
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_vm_kubevirt_io_name]
+          targetLabel: vm_name
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: vm_namespace
+  namespaceSelector:
+    any: true
+  selector:
+    matchLabels:
+      bsod-detection/windows-exporter: "true"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bsod-windows-exporter-${VM_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    bsod-detection/windows-exporter: "true"
+    vm.kubevirt.io/name: ${VM_NAME}
+spec:
+  type: ClusterIP
+  ports:
+    - name: windows-exporter
+      port: 9182
+      targetPort: 9182
+      protocol: TCP
+  selector:
+    vm.kubevirt.io/name: ${VM_NAME}

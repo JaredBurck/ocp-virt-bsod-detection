@@ -1,0 +1,112 @@
+{
+  "apiVersion": "kubevirt.io/v1",
+  "kind": "VirtualMachine",
+  "metadata": {
+    "name": "winxp-legacy",
+    "namespace": "bsod-test",
+    "labels": {
+      "app.kubernetes.io/part-of": "bsod-test",
+      "bsod-test/scenario": "legacy-client-name-fallback"
+    }
+  },
+  "spec": {
+    "runStrategy": "Halted",
+    "template": {
+      "metadata": {
+        "labels": {
+          "kubevirt.io/domain": "winxp-legacy"
+        }
+      },
+      "spec": {
+        "architecture": "amd64",
+        "domain": {
+          "clock": {
+            "timer": {
+              "hpet": {
+                "present": false
+              },
+              "pit": {
+                "tickPolicy": "delay"
+              },
+              "rtc": {
+                "tickPolicy": "catchup"
+              }
+            },
+            "utc": {}
+          },
+          "cpu": {
+            "cores": 2,
+            "sockets": 1,
+            "threads": 1,
+            "model": "host-model"
+          },
+          "devices": {
+            "disks": [
+              {
+                "name": "rootdisk",
+                "bootOrder": 1,
+                "disk": {
+                  "bus": "virtio"
+                }
+              }
+            ],
+            "inputs": [
+              {
+                "name": "tablet",
+                "type": "tablet",
+                "bus": "usb"
+              }
+            ],
+            "interfaces": [
+              {
+                "name": "default",
+                "masquerade": {},
+                "model": "virtio"
+              }
+            ]
+          },
+          "features": {
+            "acpi": {},
+            "apic": {},
+            "smm": {}
+          },
+          "firmware": {
+            "bootloader": {
+              "efi": {
+                "persistent": true,
+                "secureBoot": false
+              }
+            }
+          },
+          "machine": {
+            "type": "q35"
+          },
+          "memory": {
+            "guest": "4Gi"
+          },
+          "resources": {
+            "requests": {
+              "memory": "4Gi"
+            }
+          }
+        },
+        "evictionStrategy": "LiveMigrate",
+        "networks": [
+          {
+            "name": "default",
+            "pod": {}
+          }
+        ],
+        "terminationGracePeriodSeconds": 3600,
+        "volumes": [
+          {
+            "name": "rootdisk",
+            "persistentVolumeClaim": {
+              "claimName": "winxp-legacy-rootdisk"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

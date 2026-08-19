@@ -1,0 +1,115 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "kubevirt.io/v1",
+      "kind": "VirtualMachine",
+      "metadata": {
+        "name": "win2k22-good",
+        "namespace": "bsod-test",
+        "labels": {
+          "vm.kubevirt.io/os": "windows2k22",
+          "vm.kubevirt.io/template": "windows2k22-server-medium"
+        },
+        "annotations": {
+          "vm.kubevirt.io/os": "windows2k22"
+        }
+      },
+      "spec": {
+        "runStrategy": "Halted",
+        "template": {
+          "metadata": {
+            "annotations": {
+              "vm.kubevirt.io/os": "windows2k22"
+            },
+            "labels": {
+              "kubevirt.io/domain": "win2k22-good"
+            }
+          },
+          "spec": {
+            "domain": {
+              "cpu": { "cores": 2, "sockets": 1, "threads": 1, "model": "host-model" },
+              "features": {
+                "hyperv": { "relaxed": {}, "vapic": {}, "spinlocks": { "spinlocks": 8191 } }
+              },
+              "devices": {
+                "disks": [ { "name": "rootdisk", "bootOrder": 1, "disk": { "bus": "virtio" } } ],
+                "interfaces": [ { "name": "default", "masquerade": {}, "model": "virtio" } ]
+              },
+              "memory": { "guest": "4Gi" }
+            },
+            "evictionStrategy": "LiveMigrate"
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "kubevirt.io/v1",
+      "kind": "VirtualMachine",
+      "metadata": {
+        "name": "winsql-01",
+        "namespace": "bsod-test",
+        "labels": {
+          "app.kubernetes.io/part-of": "bsod-test"
+        }
+      },
+      "spec": {
+        "runStrategy": "Halted",
+        "template": {
+          "metadata": {
+            "labels": {
+              "kubevirt.io/domain": "winsql-01"
+            }
+          },
+          "spec": {
+            "domain": {
+              "cpu": { "cores": 2, "sockets": 1, "threads": 1, "model": "host-model" },
+              "devices": {
+                "disks": [ { "name": "rootdisk", "bootOrder": 1, "disk": { "bus": "virtio" } } ],
+                "interfaces": [ { "name": "default", "masquerade": {}, "model": "virtio" } ]
+              },
+              "memory": { "guest": "8Gi" }
+            },
+            "evictionStrategy": "LiveMigrate"
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "kubevirt.io/v1",
+      "kind": "VirtualMachine",
+      "metadata": {
+        "name": "legacy-app-server",
+        "namespace": "bsod-test",
+        "labels": {
+          "app.kubernetes.io/part-of": "bsod-test"
+        }
+      },
+      "spec": {
+        "runStrategy": "Halted",
+        "template": {
+          "metadata": {
+            "labels": {
+              "kubevirt.io/domain": "legacy-app-server"
+            }
+          },
+          "spec": {
+            "domain": {
+              "cpu": { "cores": 4, "sockets": 1, "threads": 1, "model": "host-model" },
+              "features": {
+                "hyperv": { "relaxed": {}, "vapic": {}, "spinlocks": { "spinlocks": 8191 } }
+              },
+              "devices": {
+                "disks": [ { "name": "rootdisk", "bootOrder": 1, "disk": { "bus": "virtio" } } ],
+                "interfaces": [ { "name": "default", "masquerade": {}, "model": "virtio" } ]
+              },
+              "memory": { "guest": "16Gi" }
+            },
+            "evictionStrategy": "LiveMigrate"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "apiVersion": "kubevirt.io/v1",
+  "kind": "VirtualMachineInstance",
+  "metadata": {
+    "name": "win2k22-good",
+    "namespace": "bsod-test"
+  },
+  "status": {
+    "phase": "Running",
+    "guestOSInfo": {
+      "id": "mswindows",
+      "name": "Microsoft Windows Server 2022 Standard",
+      "version": "10.0.20348"
+    },
+    "conditions": [
+      {
+        "type": "Ready",
+        "status": "True"
+      },
+      {
+        "type": "LiveMigratable",
+        "status": "False",
+        "reason": "NoTSCFrequencyNotLiveMigratable",
+        "message": "HyperV Reenlightenment VMIs cannot migrate when TSC Frequency is not exposed on the cluster: guest timers might be inconsistent"
+      }
+    ]
+  }
+}

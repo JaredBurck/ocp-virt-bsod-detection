@@ -1,0 +1,14 @@
+BSOD risk detection for OpenShift Virtualization
+Copyright 2026 Jared Burck / Red Hat SBR-Virt contributors
+
+This product includes software developed for diagnostic use with
+OpenShift Virtualization. It is not a Red Hat product, is not covered
+by a Red Hat support entitlement or SLA, and is provided on an "AS IS"
+basis. See the Apache License, Version 2.0 (LICENSE).
+
+OpenShift, Red Hat, and related marks are trademarks of Red Hat, Inc.
+Use of those names in this repository is for identification of the
+platforms the tooling inspects, not a grant of trademark rights.
+
+This distribution does not include Red Hat Knowledgebase article text or
+PDFs. Cited KCS URLs on access.redhat.com may require a subscription.

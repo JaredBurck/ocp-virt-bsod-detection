@@ -1,0 +1,32 @@
+# Monitoring UIPlugin: RHACM alert integration + incident detection + Perses.
+# See coo/README.md's "Part B: Multi-Cluster / RHACM Integration" (B1), and
+# "Part A" (A2) for the perses.enabled field this manifest also sets.
+#
+# The acm.alertmanager/acm.thanosQuerier fields below are RHACM/Part B only.
+# They target the same open-cluster-management-observability namespace
+# Services that acm/observability-deploy-guide.md Steps 1-5
+# (MultiClusterObservability CR) already stand up. Deploy this UIPlugin on
+# the HUB cluster, not on managed clusters -- it is a console feature that
+# reads FROM the hub's already-federated MCO Thanos/Alertmanager, it does
+# not federate anything itself.
+#
+# If you do not run RHACM, remove the `acm:` and `clusterHealthAnalyzer:`
+# blocks below and keep only `perses:` -- see coo/README.md Part A (A2) for
+# the equivalent minimal single-cluster manifest.
+apiVersion: observability.openshift.io/v1alpha1
+kind: UIPlugin
+metadata:
+  name: monitoring
+spec:
+  type: Monitoring
+  monitoring:
+    acm:
+      enabled: true
+      alertmanager:
+        url: 'https://alertmanager.open-cluster-management-observability.svc:9095'
+      thanosQuerier:
+        url: 'https://rbac-query-proxy.open-cluster-management-observability.svc:8443'
+    clusterHealthAnalyzer:
+      enabled: true
+    perses:
+      enabled: true

@@ -1,0 +1,24 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "instancetype.kubevirt.io/v1beta1",
+      "kind": "VirtualMachineClusterPreference",
+      "metadata": {
+        "name": "windows.2k22",
+        "labels": {"instancetype.kubevirt.io/os-type": "windows"}
+      },
+      "spec": {
+        "features": {
+          "preferredHyperv": {
+            "relaxed": {}, "vapic": {}, "spinlocks": {"spinlocks": 8191},
+            "vpindex": {}, "synic": {}, "synictimer": {}
+          }
+        },
+        "devices": {"preferredDiskBus": "virtio"},
+        "cpu": {"preferredCPUFeatures": []}
+      }
+    }
+  ]
+}

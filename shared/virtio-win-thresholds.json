@@ -1,0 +1,65 @@
+{
+  "_description": "Stream-aware virtio-win version thresholds. Single source of truth consumed by bash, PowerShell, and Python layers. This file's lookup key is the HOST RHEL/OCP stream -- it answers 'is this driver version current for the stream running it', never 'is this guest OS itself a supported OpenShift Virtualization guest'. That second, orthogonal question is answered by the GUEST-OS-keyed sibling file shared/virtio-win-guest-os-support.json (N-06, Wave 7, R-47) -- design choice (a) from the plan (a new sibling JSON, not a key nested under each stream object here), chosen specifically because the two lookup keys (host stream vs. guest OS) do not share an axis and forcing them into one structure would conflate them. See that file's own _description for the KCS-4234591-sourced guest-OS support tiers and BSOD_DRIVER_OS_INCOMPATIBLE/BSOD_CONFIG_EOL_GUEST_OS, which consume it.",
+  "_kcs": ["7141291", "7141988", "7128506"],
+  "_threshold_ordering_invariant": "A stream's `fail` floor may NEVER be below a baseline that documents a real upstream BSOD fix, and `warn` may never be below `fail`. Enforced by scripts/ci/validate-shared-thresholds.py::check_stream_threshold_ordering. el10_1.fail was 1.9.52 through v0.19.0 while multiqueue_fix_baseline is 1.9.53, so virtio-win 1.9.52 graded FAIL on OCP 4.19-4.21 but only WARN on OCP 4.22 -- a severity regression triggered by a platform upgrade. The upstream version is stream-independent: a fix that landed in 1.9.53 cannot be present in 1.9.52 on a different el stream. Note also that every layer compares only the upstream triple and discards the RPM release suffix (1.9.52-9.el10_1 -> 1.9.52), so a backported build cannot be distinguished from a vulnerable one -- another reason the floor must not be lowered.",
+  "remediation_baseline": "1.9.57",
+  "tooling_floor": "1.9.41",
+  "multiqueue_fix_baseline": "1.9.53",
+  "streams": {
+    "el8_6": {
+      "ocp_versions": ["4.12"],
+      "prometheus": "2.39.1",
+      "max": "1.9.24",
+      "fail": null,
+      "warn": null,
+      "note": "OCP 4.12 -- all major BSOD fixes require OCP upgrade",
+      "instancetype_api": null,
+      "instancetype_ga": false,
+      "spec_expansion": true
+    },
+    "el9_2": {
+      "ocp_versions": ["4.13", "4.14", "4.15"],
+      "prometheus": "2.48.0",
+      "max": "1.9.34",
+      "fail": null,
+      "warn": null,
+      "note": "OCP 4.14 -- all major BSOD fixes require OCP upgrade",
+      "instancetype_api": "instancetype.kubevirt.io/v1beta1",
+      "instancetype_ga": true,
+      "spec_expansion": true
+    },
+    "el9_4": {
+      "ocp_versions": ["4.16", "4.17", "4.18"],
+      "prometheus": "2.55.1",
+      "max": "1.9.46",
+      "fail": null,
+      "warn": "1.9.46",
+      "note": "OCP 4.16-4.18 -- multiqueue fix (1.9.53+) and VGA dump (1.9.57+) NOT available",
+      "instancetype_api": "instancetype.kubevirt.io/v1beta1",
+      "instancetype_ga": true,
+      "spec_expansion": true
+    },
+    "el9_6": {
+      "ocp_versions": ["4.19", "4.20", "4.21"],
+      "prometheus": "3.7.3",
+      "max": null,
+      "fail": "1.9.53",
+      "warn": "1.9.57",
+      "note": "OCP 4.19-4.21",
+      "instancetype_api": "instancetype.kubevirt.io/v1beta1",
+      "instancetype_ga": true,
+      "spec_expansion": false
+    },
+    "el10_1": {
+      "ocp_versions": ["4.22"],
+      "prometheus": "3.7.3",
+      "max": null,
+      "fail": "1.9.53",
+      "warn": "1.9.57",
+      "note": "RHEL 10.1",
+      "instancetype_api": "instancetype.kubevirt.io/v1beta1",
+      "instancetype_ga": true,
+      "spec_expansion": false
+    }
+  }
+}

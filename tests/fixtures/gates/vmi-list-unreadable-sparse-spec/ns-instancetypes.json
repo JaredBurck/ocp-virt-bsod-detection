@@ -1,0 +1,23 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "instancetype.kubevirt.io/v1beta1",
+      "kind": "VirtualMachineInstancetype",
+      "metadata": {
+        "name": "ns-small",
+        "namespace": "bsod-test",
+        "labels": {}
+      },
+      "spec": {
+        "cpu": {
+          "guest": 1
+        },
+        "memory": {
+          "guest": "4Gi"
+        }
+      }
+    }
+  ]
+}
