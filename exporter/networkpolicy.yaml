@@ -1,0 +1,99 @@
+# NetworkPolicy for the BSOD fleet exporter (Issue K / R-27, design doc
+# docs/design/r-27-fleet-gate-verdict-exporter.md §6.8).
+#
+# Same precedent as windows-exporter/networkpolicy-windows-exporter.yaml:
+# default-deny ingress to the exporter's own pod, then allow TCP (metrics
+# port) from the Prometheus pods that actually scrape it. Anything else
+# reaching :8080 -- another workload in openshift-cnv, a curious operator --
+# is dropped.
+#
+# UNLIKE the guest-side policy (which selects per-VM by an opt-in label
+# across every namespace a Windows VM might live in), this one selects the
+# exporter's own Deployment pod label (exporter/deployment.yaml's
+# app.kubernetes.io/name: bsod-fleet-exporter) in its single namespace
+# (openshift-cnv) -- a much smaller, static selector footprint, since there
+# is exactly one exporter Pod per cluster (see deployment.yaml's own comment
+# on replicas: 1).
+#
+# APPLY:
+#   oc apply -n openshift-cnv -f exporter/networkpolicy.yaml
+#
+# PREREQUISITE: the cluster network plugin must enforce NetworkPolicy.
+# OVN-Kubernetes (the OCP 4.12+ default) does. Verify with:
+#   oc get network.operator cluster -o jsonpath='{.spec.defaultNetwork.type}{"\n"}'
+# If this returns anything that does not enforce policy, this manifest is
+# inert and the exporter remains reachable from anywhere on the pod network
+# in openshift-cnv -- do not treat it as applied simply because `oc apply`
+# succeeded.
+#
+# CLUSTER-LOCAL, NO ACM EQUIVALENT: like deployment.yaml/service.yaml/
+# servicemonitor.yaml/service-account.yaml, this manifest is not templated
+# into acm/bsod-risk-policy.yaml -- see exporter/README.md's Deploy section
+# for why (ACM's ConfigurationPolicy templates in this repo enforce CRs
+# consumed by Prometheus, not arbitrary namespaced workloads with a
+# per-cluster image-pull/network posture).
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bsod-fleet-exporter-deny-by-default
+  namespace: openshift-cnv
+  labels:
+    app.kubernetes.io/part-of: bsod-fleet-exporter
+    app.kubernetes.io/component: bsod-detection
+  annotations:
+    bsod-detection/purpose: >-
+      Default-deny ingress to the fleet-exporter pod. Paired with
+      bsod-fleet-exporter-allow-prometheus below, which re-opens only the
+      metrics port to the monitoring stack. Applied first so a mistake in the
+      allow rule fails CLOSED (no ingress) rather than open.
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: bsod-fleet-exporter
+  policyTypes:
+    - Ingress
+  ingress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bsod-fleet-exporter-allow-prometheus
+  namespace: openshift-cnv
+  labels:
+    app.kubernetes.io/part-of: bsod-fleet-exporter
+    app.kubernetes.io/component: bsod-detection
+  annotations:
+    bsod-detection/purpose: >-
+      Allow the in-cluster Prometheus to scrape the fleet exporter's
+      /metrics endpoint. The endpoint is unauthenticated (same posture as
+      windows_exporter and every other metrics endpoint this framework
+      ships), so scrape reachability is the whole access control.
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: bsod-fleet-exporter
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Platform monitoring (the default target of exporter/servicemonitor.yaml,
+        # which lives in openshift-cnv with namespaceSelector.matchNames:
+        # [openshift-cnv]).
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+        # User-workload monitoring, when enabled. Harmless if that namespace
+        # does not exist -- an unmatched selector simply allows nothing.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-user-workload-monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 8080

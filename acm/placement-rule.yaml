@@ -1,0 +1,43 @@
+# ManagedClusterSetBinding -- grants the policy namespace access to the default cluster set.
+# ACM 2.16+ requires v1beta2 API for ManagedClusterSetBinding.
+apiVersion: cluster.open-cluster-management.io/v1beta2
+kind: ManagedClusterSetBinding
+metadata:
+  name: default
+  namespace: open-cluster-management-policies
+spec:
+  clusterSet: default
+---
+# Placement -- selects managed clusters that run OpenShift Virtualization.
+# Does NOT use claimSelector for platform because BareMetal clusters report
+# platform=BareMetal, not platform=OpenShift. Uses label-based selection only.
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: bsod-risk-placement
+  namespace: open-cluster-management-policies
+spec:
+  predicates:
+    - requiredClusterSelector:
+        labelSelector:
+          matchExpressions:
+            - key: vendor
+              operator: In
+              values:
+                - OpenShift
+            - key: cnv
+              operator: Exists
+---
+apiVersion: policy.open-cluster-management.io/v1
+kind: PlacementBinding
+metadata:
+  name: bsod-risk-placement-binding
+  namespace: open-cluster-management-policies
+placementRef:
+  apiGroup: cluster.open-cluster-management.io
+  kind: Placement
+  name: bsod-risk-placement
+subjects:
+  - apiGroup: policy.open-cluster-management.io
+    kind: Policy
+    name: bsod-risk-detection

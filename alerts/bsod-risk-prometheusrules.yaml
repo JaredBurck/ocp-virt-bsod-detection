@@ -1,0 +1,705 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bsod-risk-alerts
+  namespace: openshift-cnv
+  labels:
+    prometheus: k8s
+    role: alert-rules
+    app.kubernetes.io/component: bsod-detection
+spec:
+  groups:
+    - name: bsod-risk.rules
+      rules:
+
+        # THRESHOLD SOURCE: shared/storage-latency-thresholds.json, bound by
+        # scripts/ci/validate-shared-thresholds.py. Editing a number here
+        # without the shared config (or vice versa) fails CI.
+        #
+        # H-5: these alerts previously fired at an hourly MEAN of 30 s/op. That
+        # is unreachable before the BSOD it predicts -- IoTimeoutValue is
+        # breached by an INDIVIDUAL slow I/O, and a one-hour mean of 30 s/op
+        # means the guest was unusable for an hour and already bugchecked. The
+        # framework's own analyzer flags the same quantity at 500ms, so the
+        # always-on customer-facing layer was ~60x LESS sensitive than the
+        # offline one. Now: 0.5 warning / 1.0 critical + a burst rule.
+
+        # Alert: Sustained elevated disk latency -- leading indicator
+        # Risk: MEMORY_MANAGEMENT (0x1A), KERNEL_DATA_INPAGE_ERROR (0x7A)
+        # KCS: 7132512
+        # NOTE: Uses recording rule bsod:vmi_disk_latency:avg_1h from
+        # alerts/bsod-risk-recording-rules.yaml. Deploy both CRs together.
+        # [KCS-VALIDATED]
+        - alert: BSODRisk_StorageLatencyElevated
+          annotations:
+            summary: "VM disk I/O latency elevated -- storage degradation developing"
+            description: |
+              VM {{ $labels.name }} in namespace {{ $labels.namespace }} has averaged
+              {{ $value | humanize }}s per disk I/O over the last hour on its WORST
+              direction (read or write), at or above the 0.5s sustained-degradation threshold. This is a LEADING indicator: storage
+              in this state produces the tail-latency spikes that breach the 60s VirtIO
+              IoTimeoutValue and trigger MEMORY_MANAGEMENT (0x1A) or
+              KERNEL_DATA_INPAGE_ERROR (0x7A).
+              Action: investigate backing storage before latency worsens; consider
+              raising IoTimeoutValue (see shared/io-timeout-thresholds.json).
+            runbook_url: "https://access.redhat.com/solutions/7132512"
+            contact_first: "Red Hat (if recent platform change) / Microsoft (if no changes)"
+            stop_codes: "0x1A, 0x7A, 0x50, 0xEF"
+            calibration_status: |
+              This threshold (0.5s, shared/storage-latency-thresholds.json) was adopted by
+              operator decision on 2026-07-28, replacing a defective 30s/op mean that could
+              only fire after a Windows guest had already bugchecked. Calibration is PARTIAL
+              (measured 2026-07-29 on a test/workshop cluster) -- see _calibration_status in
+              shared/storage-latency-thresholds.json for what that measurement does and does
+              not establish. If this alert fires or is persistently noisy/quiet for your
+              storage backend, see the "Storage latency calibration" section in
+              docs/admin-runbook.md before treating the threshold itself as ground truth.
+          expr: |
+            bsod:vmi_disk_latency:worst_1h >= 0.5
+          for: 15m
+          labels:
+            severity: warning
+            bsod_domain: storage
+            kcs: "7132512"
+
+        # Alert: Severe sustained disk latency
+        # Risk: MEMORY_MANAGEMENT (0x1A), KERNEL_DATA_INPAGE_ERROR (0x7A)
+        # KCS: 7132512
+        # Supersedes the former 30 s/op rule, which this subsumes.
+        # [KCS-VALIDATED]
+        - alert: BSODRisk_StorageLatencyHigh
+          annotations:
+            summary: "VM disk I/O latency severely degraded -- BSOD risk"
+            description: |
+              VM {{ $labels.name }} in namespace {{ $labels.namespace }} has averaged
+              {{ $value | humanize }}s per disk I/O over the last hour on its WORST
+              direction (read or write), at or above the 1.0s severe-degradation threshold. Individual I/Os in this regime routinely
+              exceed the 60s VirtIO IoTimeoutValue, triggering MEMORY_MANAGEMENT (0x1A) or
+              KERNEL_DATA_INPAGE_ERROR (0x7A) BSODs.
+            runbook_url: "https://access.redhat.com/solutions/7132512"
+            contact_first: "Red Hat (if recent platform change) / Microsoft (if no changes)"
+            stop_codes: "0x1A, 0x7A, 0x50, 0xEF"
+            calibration_status: |
+              This threshold (1.0s, shared/storage-latency-thresholds.json) was adopted by
+              operator decision on 2026-07-28, replacing a defective 30s/op mean that could
+              only fire after a Windows guest had already bugchecked. Calibration is PARTIAL
+              (measured 2026-07-29 on a test/workshop cluster) -- see _calibration_status in
+              shared/storage-latency-thresholds.json for what that measurement does and does
+              not establish. If this alert fires or is persistently noisy/quiet for your
+              storage backend, see the "Storage latency calibration" section in
+              docs/admin-runbook.md before treating the threshold itself as ground truth.
+          expr: |
+            bsod:vmi_disk_latency:worst_1h >= 1
+          for: 10m
+          labels:
+            severity: critical
+            bsod_domain: storage
+            kcs: "7132512"
+
+        # Alert: Latency BURST -- tail-latency approximation
+        # Risk: MEMORY_MANAGEMENT (0x1A) -- this is the shape that actually
+        # breaches IoTimeoutValue.
+        # KCS: 7132512
+        # KubeVirt exposes no _bucket histograms (see CLAUDE.md), so true
+        # percentiles are unavailable. max_over_time() of a 5m rate surfaces
+        # spikes that the 1h mean erases -- the closest available proxy for p99.
+        # [KCS-VALIDATED]
+        - alert: BSODRisk_StorageLatencyBurst
+          annotations:
+            summary: "VM disk I/O latency burst -- transient spike toward VirtIO timeout"
+            description: |
+              VM {{ $labels.name }} in namespace {{ $labels.namespace }} saw a 5-minute
+              window averaging {{ $value | humanize }}s per disk I/O on its worst direction
+              (read or write) within the last hour,
+              at or above the 5s burst threshold -- even though its hourly mean may look
+              healthy. Transient spikes of this shape are what breach the 60s VirtIO
+              IoTimeoutValue and produce MEMORY_MANAGEMENT (0x1A) BSODs.
+              NOTE: this is an APPROXIMATION of tail latency. KubeVirt does not expose
+              histogram buckets, so a true p99 cannot be computed.
+            runbook_url: "https://access.redhat.com/solutions/7132512"
+            contact_first: "Red Hat (if recent platform change) / Microsoft (if no changes)"
+            stop_codes: "0x1A, 0x7A, 0x50, 0xEF"
+            calibration_status: |
+              This threshold (5s, shared/storage-latency-thresholds.json) was adopted by
+              operator decision on 2026-07-28. It is also a tail-latency APPROXIMATION (no
+              true p99 available -- see NOTE above), and calibration is PARTIAL (measured
+              2026-07-29 on a test/workshop cluster) -- see _calibration_status in
+              shared/storage-latency-thresholds.json for what that measurement does and does
+              not establish. If this alert fires or is persistently noisy/quiet for your
+              storage backend, see the "Storage latency calibration" section in
+              docs/admin-runbook.md before treating the threshold itself as ground truth.
+          expr: |
+            max_over_time(
+              max by (name, namespace, drive) (
+                label_replace(
+                  sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_read_times_seconds_total[5m]))
+                    /
+                  sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_read_total[5m])),
+                  "direction", "read", "", "")
+                or
+                label_replace(
+                  sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_write_times_seconds_total[5m]))
+                    /
+                  sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_write_total[5m])),
+                  "direction", "write", "", "")
+              )[1h:5m]
+            ) >= 5
+          for: 0m
+          labels:
+            severity: critical
+            bsod_domain: storage
+            kcs: "7132512"
+
+        # Alert: VM memory utilization sustained above 85%
+        # Risk: Amplifies storage-related BSODs via pagefile pressure
+        # KCS: 7132512
+        # [GENERAL-KNOWLEDGE]
+        - alert: BSODRisk_MemoryPressure
+          annotations:
+            summary: "VM memory pressure increases BSOD risk"
+            description: |
+              VM {{ $labels.name }} in namespace {{ $labels.namespace }} has sustained
+              memory utilization above 85% for 30 minutes. Pagefile pressure on slow
+              storage amplifies MEMORY_MANAGEMENT (0x1A) BSOD risk.
+            runbook_url: "https://access.redhat.com/solutions/7132512"
+            contact_first: "Microsoft (if no recent platform changes)"
+            stop_codes: "0x1A"
+          expr: |
+            (
+              kubevirt_vmi_memory_used_bytes
+              / on(name, namespace) kubevirt_vmi_memory_domain_bytes
+            ) > 0.85
+            and on(name, namespace)
+            kubevirt_vmi_memory_domain_bytes > 0
+            and on(name, namespace)
+            kubevirt_vmi_info{os=~"windows|win.*"}
+          for: 30m
+          labels:
+            severity: warning
+            bsod_domain: resource
+            kcs: "7132512"
+
+        # Alert: Guest OS panic detected via QMP GUEST_PANICKED event
+        # Risk: Direct BSOD detection, if/when this metric ships.
+        # KCS: 7141291
+        # [UNVALIDATED] -- kubevirt_vmi_guest_os_panic_total does not exist on
+        # ANY shipping OpenShift Virtualization release as of this writing
+        # (confirmed absent via direct Prometheus/API query on a live OCP
+        # Virt 4.19.25 cluster, 2026-07-10). Upstream KubeVirt added the
+        # metric itself in kubevirt/kubevirt#17836 and a first alert
+        # consuming it (VMNonRecoverableOSPanic) only merged 2026-06-30
+        # (kubevirt/kubevirt#18004) -- neither has reached a released HCO/CNV
+        # build yet. This alert is a forward-looking placeholder: it is
+        # harmless to ship (it simply never fires) but MUST NOT be presented
+        # to customers as a working detection mechanism today.
+        # Reliable alternative until this metric ships: virt-launcher QMP
+        # log analysis via must-gather, see insights-rules/plugins/
+        # bsod_crashdump_checks.py (has_guest_panicked/has_guest_crashloaded),
+        # which parses GUEST_PANICKED/GUEST_CRASHLOADED events directly from
+        # logs and does not depend on this metric at all.
+        - alert: BSODRisk_GuestCrash
+          annotations:
+            summary: "Windows VM BSOD detected -- pre-crash risk context available"
+            description: |
+              VM {{ $labels.name }} in namespace {{ $labels.namespace }} triggered a
+              guest OS panic event (GUEST_PANICKED or GUEST_CRASHLOADED via QMP).
+              This indicates a Windows BSOD has occurred. If GUEST_PANICKED (not
+              CRASHLOADED), no memory dump was generated -- check for VirtIO VGA
+              adapter (KCS-7141988).
+              Immediate actions:
+                1. Run: cnv-win-bsod-audit.sh {{ $labels.namespace }} {{ $labels.name }}
+                2. Collect guest crash dump: cnv-qga-fleet-collect.sh --namespace {{ $labels.namespace }} --vm {{ $labels.name }} --stage
+                3. Open Red Hat support case with gate report + crash dump
+              Pre-crash risk factors available via: bsod:vm_risk_factor_count:gauge
+            runbook_url: "https://access.redhat.com/solutions/7141291"
+            contact_first: "Red Hat (if recent virtio-win update or migration) / Microsoft (if no changes)"
+            stop_codes: "varies (check Windows minidump or virt-launcher logs)"
+            status: |
+              PREVIEW -- this alert depends on kubevirt_vmi_guest_os_panic_total,
+              which no released HCO/CNV build exposes as of 2026-07-28. It cannot
+              fire on any currently shipping OpenShift Virtualization release.
+              Do not treat a quiet BSODRisk_GuestCrash as evidence that no guest
+              has crashed. Inspect virt-launcher logs for GUEST_PANICKED /
+              GUEST_CRASHLOADED and attach them with gate --json to the support
+              case. If this alert DOES fire, the metric has shipped and this
+              rule has never been exercised against real data -- verify against
+              virt-launcher logs before acting on it.
+          expr: |
+            increase(kubevirt_vmi_guest_os_panic_total[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+            bsod_domain: crash
+            kcs: "7141291"
+            # L-8: machine-readable so Alertmanager routing, ACM policies and
+            # dashboards can filter preview rules without parsing annotations.
+            # Shipping it enabled is safe (the metric does not exist, so it
+            # never fires); shipping it INDISTINGUISHABLE from a working
+            # detection is not, because a silent alert reads as "no crashes".
+            bsod_status: preview
+
+        # Alert: VM migration on heterogeneous CPU cluster (R-9, replaces
+        # BSODRisk_RecentVMMigrationDetected from v0.10.0; renamed in v0.11.0).
+        # Risk: CLOCK_WATCHDOG_TIMEOUT (0x101), MACHINE_CHECK_EXCEPTION (0x9C)
+        # Fires when: a migration reaches Running phase AND the cluster has
+        # heterogeneous CPU vendors (bsod:cluster_cpu_model_count:gauge > 1).
+        # On homogeneous clusters (count==1), migration alone does not fire.
+        # On clusters without CPU-vendor labels (count==0, e.g. pre-OCP 4.14
+        # without kube-state-metrics allowlist), the alert does NOT fire --
+        # acceptable because absence of vendor labels implies KubeVirt is not
+        # fully configured. Deploy kube-state-metrics node label allowlist for
+        # full R-9 coverage (see operator-runbook.md).
+        # Detects BOTH vendor and intra-vendor generation heterogeneity via
+        # CPU capability signatures (see the recording rule's comment). Verified
+        # on a live all-AMD Rome+Milan cluster where the previous vendor-count
+        # expression returned 1 and this returns 2.
+        # LIMITATION: two generations sharing all sampled feature labels group
+        # together; full per-node comparison remains offline via
+        # BSOD_CPU_CPU_MODEL_MIGRATION.
+        # [GENERAL-KNOWLEDGE]
+        - alert: BSODRisk_HeterogeneousCPUMigration
+          annotations:
+            summary: "VM migration on heterogeneous CPU cluster -- BSOD risk"
+            description: |
+              A VirtualMachineInstance migration reached the Running phase on a cluster
+              with heterogeneous CPU capability groups (differing CPU feature sets --
+              mixed vendors OR mixed generations of the same vendor, e.g. EPYC Rome
+              alongside EPYC Milan). Migrations across mixed CPU
+              architectures can trigger CLOCK_WATCHDOG_TIMEOUT (0x101) or
+              MACHINE_CHECK_EXCEPTION (0x9C) on Windows VMs. Verify that source and
+              target node CPU features are compatible. Run:
+                cnv-win-bsod-audit.sh <namespace> <vm-name>
+              Compare worker `cpu-feature.node.kubevirt.io/*` labels if Gate 4 WARNs;
+              attach `--json` to the support case.
+            runbook_url: "https://access.redhat.com/solutions/7125237"
+            contact_first: "Red Hat"
+            stop_codes: "0x101, 0x9C"
+          expr: |
+            increase(kubevirt_vmi_migration_phase_transition_time_from_creation_seconds_count{phase="Running"}[5m]) > 0
+            and on()
+            bsod:cluster_cpu_model_count:gauge > 1
+          for: 0m
+          labels:
+            severity: warning
+            bsod_domain: cpu
+            kcs: "7125237"
+
+        # Alert: AMD node detected -- manual microcode verification required
+        # Risk: PFN_LIST_CORRUPT (0x4E) on outdated AMD microcode
+        # KCS: 7132511
+        # NOTE: No microcode version metric exists in Prometheus. This alert
+        # identifies AMD nodes that require manual verification via node debug.
+        # PREREQUISITE: kube-state-metrics must have the KubeVirt CPU-vendor
+        # labels in --metric-labels-allowlist. On stock OCP, this is NOT enabled
+        # by default. See operator-runbook.md for configuration instructions.
+        # Without the allowlist, this alert will never fire.
+        # NAMESPACE LABEL: this alert is node-scoped, not VM-scoped -- Nodes
+        # aren't namespaced Kubernetes objects. Left un-aggregated, the raw
+        # `kube_node_labels` series carries a `namespace` label that is pure
+        # scrape-target metadata (the namespace kube-state-metrics itself runs
+        # in, i.e. openshift-monitoring), NOT a VM's namespace. `count by
+        # (node)` strips that (and every other kube-state-metrics/cpu-feature
+        # label) so consumers -- e.g. the "All Firing Alerts (Detail)" Grafana
+        # panel -- don't misread it as a VM namespace. See
+        # docs/operator-runbook.md's Alert Response Guide.
+        # [KCS-VALIDATED] -- KCS confirms AMD microcode risk, but alert is advisory only
+        - alert: BSODRisk_AMDNodeRequiresMicrocodeVerification
+          annotations:
+            summary: "AMD node detected -- verify microcode version manually"
+            description: |
+              Node {{ $labels.node }} is running AMD CPUs. No Prometheus metric exposes
+              microcode version; manual verification is required. Use
+              'oc debug node/{{ $labels.node }} -- cat /proc/cpuinfo | grep microcode'
+              to verify version is >= 0xb002151. Outdated AMD microcode can trigger
+              PFN_LIST_CORRUPT (0x4E) BSODs on Windows VMs.
+            runbook_url: "https://access.redhat.com/solutions/7132511"
+            contact_first: "Red Hat"
+            stop_codes: "0x4E"
+            prerequisite: |
+              This alert requires kube_node_labels to include KubeVirt CPU-vendor node labels.
+              On OCP 4.14+ (kube-state-metrics with nodes=[*] allowlist), these are exposed by
+              default. On older versions, configure via:
+              oc -n openshift-monitoring edit configmap cluster-monitoring-config
+              Add: kubeStateMetrics.metricLabelsAllowlist.nodes=[cpu-vendor.node.kubevirt.io/*]
+            resolution: |
+              After verifying microcode >= 0xb002151 on this node, acknowledge it:
+                oc label node {{ $labels.node }} bsod-microcode-verified=true
+              The alert then resolves for that node. Remove the label (or set it
+              to any other value) to re-open verification after a firmware or
+              microcode change.
+          # L-7: previously `... amd="true"}) > 0`, which is an inventory fact,
+          # not an alert condition -- it fired from the moment an AMD node
+          # joined and never resolved, because nothing it measures can change.
+          # A permanently-firing alert is worse than no alert: it trains
+          # operators to ignore the row and it crowds real findings out of
+          # "currently firing" views. There is no microcode metric to key off,
+          # so the acknowledgement is an operator-applied node label -- which
+          # gives the alert the one thing it lacked, a way to become false.
+          expr: |
+            count by (node) (
+              kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true",
+                               label_bsod_microcode_verified!="true"}
+            ) > 0
+          for: 30m
+          labels:
+            severity: info
+            bsod_domain: cpu
+            kcs: "7132511"
+
+        # Alert: Storage latency trending upward (sustained AND increasing)
+        # Risk: Gradual storage degradation leading to BSOD
+        # KCS: 7132512
+        # [KCS-VALIDATED] -- same root cause as StorageLatencyHigh but trending-aware
+        - alert: BSODRisk_StorageLatencyTrending
+          annotations:
+            summary: "VM storage latency trending upward toward BSOD threshold"
+            description: |
+              VM {{ $labels.name }} in namespace {{ $labels.namespace }} has average
+              worst-direction (read or write) disk latency at or above 0.5s AND it has increased by more than 50%
+              over the 24-hour baseline. This sustained upward trend indicates storage
+              degradation heading toward the 60s VirtIO IoTimeoutValue.
+            runbook_url: "https://access.redhat.com/solutions/7132512"
+            contact_first: "Red Hat (if recent platform change) / Microsoft (if no changes)"
+            stop_codes: "0x1A, 0x7A, 0x50, 0xEF"
+          expr: |
+            bsod:vmi_disk_latency:worst_1h >= 0.5
+            and
+            (bsod:vmi_disk_latency:worst_1h / bsod:vmi_disk_latency:worst_24h) > 1.5
+          for: 30m
+          labels:
+            severity: warning
+            bsod_domain: storage
+            kcs: "7132512"
+
+        # Alert: Windows VM cannot be safely evicted (migration blocked)
+        # Risk: Node drain will hang then force-kill -- dirty shutdown / BSOD
+        # NOTE: kubevirt_vmi_info 'evictable' label reflects whether the VMI
+        # CAN be safely disrupted during a node drain. evictable="false" means
+        # the VM has evictionStrategy=LiveMigrate but migration is BLOCKED by
+        # device or feature constraints (e.g. persistent TPM, host-passthrough,
+        # missing TSC frequency labels). Node drains will hang at the PDB,
+        # then force-delete the pod after the drain timeout -- causing a dirty
+        # shutdown indistinguishable from a BSOD.
+        #
+        # LIMITATION: This alert does NOT detect evictionStrategy=None (which
+        # Prometheus reports as evictable="true" because the pod CAN be
+        # evicted). For evictionStrategy=None detection, use the cluster-side
+        # BSOD audit gate script (Gate 6) or the Python analysis engine.
+        # [GENERAL-KNOWLEDGE]
+        - alert: BSODRisk_EvictionBlocked
+          annotations:
+            summary: "Windows VM live migration blocked -- node drain will force-stop"
+            description: |
+              Windows VM {{ $labels.name }} in namespace {{ $labels.namespace }} has
+              evictionStrategy=LiveMigrate but is NOT live-migratable (evictable="false").
+              Common causes: persistent TPM, missing TSC frequency scheduling labels,
+              host-passthrough CPU model, or passthrough devices. On node drain, the
+              PodDisruptionBudget will block eviction, and after the drain timeout the pod
+              will be force-deleted -- causing a dirty shutdown that can trigger or
+              masquerade as a BSOD. Either resolve the migration blocker or set
+              evictionStrategy to LiveMigrateIfPossible so the VM can be stopped gracefully.
+            runbook_url: "https://access.redhat.com/solutions/7132512"
+            contact_first: "Red Hat (migration infrastructure issue)"
+            stop_codes: "N/A (dirty shutdown, not a true BSOD)"
+          expr: |
+            kubevirt_vmi_info{evictable="false",os=~"windows|win.*"} == 1
+          for: 5m
+          labels:
+            severity: warning
+            bsod_domain: config
+            kcs: "7132512"
+
+        # Alert: virt-launcher pods capped by their OWN CPU limit
+        # Risk: CLOCK_WATCHDOG_TIMEOUT (0x101), MACHINE_CHECK_EXCEPTION (0x9C)
+        # KCS: 7132511 (general overcommit guidance)
+        # THRESHOLD SOURCE: shared/host-contention-thresholds.json, bound by
+        # scripts/ci/validate-shared-thresholds.py.
+        #
+        # RENAMED IN v0.26.0 (peer-review F-02). This rule shipped as
+        # BSODRisk_HostCPUContention, which is not what it measures. Two
+        # problems, both proven with promtool:
+        #
+        #  1. IT CANNOT FIRE ON A DEFAULT CLUSTER. cAdvisor populates the CFS
+        #     period/throttle counters only when the cgroup carries a CPU
+        #     bandwidth quota -- i.e. only when a CPU *limit* is set. KubeVirt
+        #     sets CPU requests, not limits, on virt-launcher unless the VM
+        #     specifies resources.limits.cpu or uses dedicatedCpuPlacement. On
+        #     a default cluster both sums are 0, the ratio is 0/0 -> NaN, and
+        #     `NaN > 0.25` is false. The alert was SILENT at 100% node
+        #     contention -- the exact condition it claimed to detect.
+        #
+        #  2. THE SEMANTICS WERE INVERTED. CFS throttling measures a pod being
+        #     capped by its OWN limit, which is frequently benign and is not
+        #     node contention. A node oversubscribed on requests with no limits
+        #     -- the standard overcommit posture, and the noisy-neighbour case
+        #     this was meant to catch -- throttles ZERO. Conversely one limited
+        #     pod exceeding its quota on an idle node fired it and blamed the
+        #     node.
+        #
+        # The expression is unchanged and correct for the condition it really
+        # detects, so it is kept under an honest name. BSODRisk_HostCPUContention
+        # below now carries the node-contention signal via PSI.
+        #
+        # The `and on(node) ... > 0` guard makes the missing-denominator case
+        # explicit: without it, "no CPU limit anywhere" and "limits set, no
+        # throttling" are both NaN and indistinguishable.
+        #
+        # [GENERAL-KNOWLEDGE] -- the 25% threshold is UNCALIBRATED (see
+        # shared/host-contention-thresholds.json's _calibration_status).
+        - alert: BSODRisk_VirtLauncherCPUThrottled
+          annotations:
+            summary: "virt-launcher pod(s) on this node are being throttled by their own CPU limit"
+            description: |
+              Node {{ $labels.node }} shows sustained CFS CPU throttling on
+              virt-launcher pods: {{ $value | humanizePercentage }} of
+              scheduling periods were throttled over the last 5 minutes, at or
+              above the 25% threshold. This means those pods are hitting their
+              CONFIGURED CPU LIMIT -- it is not a measure of node-level
+              contention (see BSODRisk_HostCPUContention for that). Windows
+              guests are far more sensitive to scheduling jitter than Linux
+              guests, so sustained throttling can still trigger
+              CLOCK_WATCHDOG_TIMEOUT (0x101) or MACHINE_CHECK_EXCEPTION (0x9C).
+              Action: raise or remove the CPU limit on the affected VMs, or
+              reduce their vCPU demand.
+            runbook_url: "https://access.redhat.com/solutions/7132511"
+            contact_first: "Red Hat (if recent scheduling/density change) / Microsoft (if no changes)"
+            stop_codes: "0x101, 0x9C"
+            prerequisite: |
+              Only produces series for virt-launcher pods that have a CPU LIMIT
+              set (resources.limits.cpu, or dedicatedCpuPlacement). KubeVirt
+              sets requests but not limits by default, so on a stock cluster
+              this alert is correctly silent -- there is no quota to exceed.
+              That is a real limitation, not a bug: see
+              shared/alert-liveness.json.
+            calibration_status: |
+              This threshold (25% throttle ratio, shared/host-contention-thresholds.json)
+              is UNCALIBRATED -- adopted as a starting point pending a live
+              induced-contention validation run (constrain a virt-launcher
+              pod's CPU limit below its demand and confirm the alert fires and
+              clears). See _calibration_status in
+              shared/host-contention-thresholds.json for what remains
+              unestablished, and docs/admin-runbook.md's "Storage latency
+              calibration" section for the calibration workflow this alert
+              will follow once a live run is completed.
+          expr: |
+            (
+              sum by (node) (rate(container_cpu_cfs_throttled_periods_total{pod=~"virt-launcher-.*"}[5m]))
+              /
+              sum by (node) (rate(container_cpu_cfs_periods_total{pod=~"virt-launcher-.*"}[5m]))
+            ) > 0.25
+            and on(node)
+            sum by (node) (rate(container_cpu_cfs_periods_total{pod=~"virt-launcher-.*"}[5m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+            bsod_domain: cpu
+            kcs: "7132511"
+
+        # Alert: genuine node-level CPU contention, via PSI
+        # Risk: CLOCK_WATCHDOG_TIMEOUT (0x101), MACHINE_CHECK_EXCEPTION (0x9C)
+        # KCS: 7132511 (general overcommit guidance)
+        # THRESHOLD SOURCE: shared/host-contention-thresholds.json
+        # (psi_cpu_waiting_ratio_warn), bound by
+        # scripts/ci/validate-shared-thresholds.py.
+        #
+        # ADDED IN v0.26.0 (peer-review F-02) to replace the CFS-based signal
+        # that used to carry this name, then CORRECTED against a live cluster
+        # before release (OCP 4.18.26 / CNV 4.18.45, ARO, 2026-08-19).
+        #
+        # The first implementation used Linux PSI
+        # (node_pressure_cpu_waiting_seconds_total). PSI IS ABSENT ON THAT
+        # CLUSTER -- no node_pressure_* series exist at all, though
+        # node_exporter is running and healthy. Shipping it would have
+        # reproduced F-02 exactly: an alert named for a risk it cannot
+        # observe. That the risk was recorded as "unconfirmed" rather than
+        # assumed is the only reason it was checked before release.
+        #
+        # node_schedstat_waiting_seconds_total IS present (72 series, all 6
+        # nodes). It is /proc/schedstat's run-queue wait time: the aggregate
+        # seconds tasks spent waiting for a CPU, per CPU. Like PSI -- and
+        # unlike the CFS counters -- it is populated regardless of whether any
+        # cgroup carries a bandwidth quota, so it works on the default KubeVirt
+        # posture (requests, no limits), which is precisely the configuration
+        # under which overcommit happens and the old alert was blind.
+        #
+        # UNITS DIFFER FROM PSI, which is why the threshold moved from 0.25 to
+        # 1.0. PSI reports a 0-1 stall fraction; schedstat reports aggregate
+        # task-wait seconds per second, which is unbounded above. avg by
+        # (instance) normalises across a node's CPUs, so the value reads as
+        # "average number of tasks queued per CPU". Carrying 0.25 across would
+        # have been badly wrong: measured over 24h on the live cluster the
+        # KubeVirt workers hit p95 0.243, p99 0.305, max 0.431 while
+        # essentially idle, and spent 4.9% of the window above 0.25. See
+        # shared/host-contention-thresholds.json for the full measurement.
+        #
+        # SCOPED to KubeVirt nodes, which the PSI version deliberately was not.
+        # node_exporter labels series with `instance` and kube-state-metrics
+        # with `node`; the concern was that a join matching nothing would
+        # produce silence -- the exact F-02 failure. Live check settled it:
+        # both carry the plain node name, so label_replace normalises them
+        # cleanly. Verified on-cluster to return exactly the 3 KubeVirt workers
+        # out of 6 nodes. With the topology confirmed the scoping is safe, and
+        # it removes the infra-node noise the unscoped version accepted.
+        #
+        # [GENERAL-KNOWLEDGE] -- CPU starvation triggering these stop codes on
+        # Windows guests is established virtualization practice. The 1.0
+        # threshold is PARTIALLY calibrated: a real baseline was measured, but
+        # no induced-contention run has established what level actually harms a
+        # Windows guest. See shared/host-contention-thresholds.json.
+        - alert: BSODRisk_HostCPUContention
+          annotations:
+            summary: "Node-level CPU contention -- runnable tasks are waiting for CPU"
+            description: |
+              KubeVirt node {{ $labels.instance }} averaged {{ $value | humanize }}
+              tasks queued per CPU over the last 5 minutes (run-queue wait time
+              from /proc/schedstat), at or above the threshold of 1. Windows VMs
+              on this node may experience scheduling delays severe enough to
+              trigger CLOCK_WATCHDOG_TIMEOUT (0x101) or MACHINE_CHECK_EXCEPTION
+              (0x9C). Investigate node-level CPU overcommit: reduce VM density
+              on this node, or raise CPU requests so the scheduler stops packing
+              it.
+              Unlike BSODRisk_VirtLauncherCPUThrottled, this fires on real
+              contention even when no CPU limits are set -- which is the default
+              KubeVirt configuration, and the case that alert cannot see.
+            runbook_url: "https://access.redhat.com/solutions/7132511"
+            contact_first: "Red Hat (if recent scheduling/density change) / Microsoft (if no changes)"
+            stop_codes: "0x101, 0x9C"
+            prerequisite: |
+              Requires node_exporter (present in OCP's default monitoring stack)
+              and kube-state-metrics exposing KubeVirt node labels (the OCP
+              4.14+ nodes=[*] default). Both confirmed present on OCP 4.18.26 /
+              CNV 4.18.45.
+              NOTE: this alert originally used Linux PSI
+              (node_pressure_cpu_waiting_seconds_total), which is ABSENT on that
+              cluster -- no node_pressure_* series exist at all. If you are
+              adapting this rule, do not assume PSI is available just because
+              node_exporter is running. Verify a signal exists before relying on
+              it:
+                oc get route -n openshift-monitoring thanos-querier
+                curl -H "Authorization: Bearer $(oc whoami -t)" \
+                  --data-urlencode 'query=count(node_schedstat_waiting_seconds_total)' \
+                  https://<thanos-host>/api/v1/query
+            calibration_status: |
+              PARTIAL (2026-08-19). A real baseline WAS measured: over 24h on a
+              live OCP 4.18.26 / CNV 4.18.45 cluster the KubeVirt worker nodes
+              ran p50 0.0589, p95 0.243, p99 0.305, max 0.431 -- so the 1.0
+              threshold sits 2.3x above the observed peak and the nodes spent 0%
+              of the window above it. That establishes the threshold does not
+              FALSE-POSITIVE on a lightly-loaded cluster.
+              It does NOT establish that 1.0 CATCHES contention severe enough to
+              bugcheck a Windows guest -- that needs an induced-contention run,
+              which has not been done. Nor is a near-idle cluster (its VMs were
+              not running) representative of production density. Treat a firing
+              instance as a prompt to investigate, not a measured verdict. See
+              _calibration_status in shared/host-contention-thresholds.json.
+          expr: |
+            avg by (instance) (rate(node_schedstat_waiting_seconds_total[5m]))
+            * on(instance) group_left()
+            (
+              count by (instance) (
+                label_replace(kube_node_labels{label_cpu_vendor_node_kubevirt_io_intel="true"}, "instance", "$1", "node", "(.*)")
+                or
+                label_replace(kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true"}, "instance", "$1", "node", "(.*)")
+              ) > 0
+            ) > 1
+          for: 10m
+          labels:
+            severity: warning
+            bsod_domain: cpu
+            kcs: "7132511"
+
+        # Alert: Fleet-wide evidence completeness below threshold
+        # Risk: NONE DIRECTLY -- this is an OBSERVABILITY/coverage alert, not a
+        # BSOD-trigger alert. It says "we might be blind to risk on a large
+        # part of the fleet", not "there is risk". Every other alert in this
+        # file makes a BSOD-trigger claim tagged by confidence tier per
+        # CLAUDE.md; this one deliberately does not, hence no stop_codes and
+        # kcs: "N/A" below.
+        # THRESHOLD SOURCE: shared/evidence-completeness-thresholds.json
+        # (fleet_warn_below_pct, stored as a 0-100 percent for readability),
+        # bound by scripts/ci/validate-shared-thresholds.py -- the literal
+        # below (0.8) is that same 80 divided by 100, since the recording
+        # rule it reads is a 0-1 ratio (see bsod:fleet_evidence_completeness:ratio's
+        # own comment for why raw counts + a ratio, not an unweighted percent
+        # average).
+        # NOTE: Uses recording rule bsod:fleet_evidence_completeness:ratio from
+        # alerts/bsod-risk-recording-rules.yaml. Deploy both CRs together.
+        # Requires: scripts/cnv-bsod-fleet-exporter.sh deployed and scraped
+        # (see exporter/ for the Deployment/Service/ServiceMonitor manifests).
+        # Issue K (docs/info/peer-reviews/v0.19.0/issues/
+        # gitlab-issue-drafts-open-after-remediation.md) / R-27 (MASTER-
+        # remediation-plan.md's "continuous gate-verdict export").
+        # [UNVALIDATED] -- see shared/evidence-completeness-thresholds.json's
+        # _calibration_status; the 80% threshold is a reasoned starting point,
+        # not a measured one.
+        - alert: BSODRisk_FleetEvidenceIncomplete
+          annotations:
+            summary: "Fleet-wide BSOD evidence completeness below the configured threshold"
+            description: |
+              Checks-weighted evidence completeness across the fleet is
+              {{ $value | humanizePercentage }}, below the 80% threshold. This
+              means a significant share of the checks this framework tries to
+              run per Windows VM are not reaching a verdict (UNKNOWN, not a
+              pass) -- typically because guest-side evidence (QEMU Guest
+              Agent, windows_exporter) is not deployed or not running on a
+              large part of the fleet. This alert does NOT mean BSOD risk is
+              present -- it means the framework's other alerts and gates may
+              be running mostly blind on the affected VMs. Deploy/repair the
+              QEMU Guest Agent and/or windows_exporter fleet-wide, then
+              re-check `cnv-win-bsod-audit.sh --all-namespaces --json | jq
+              '.vms[] | select(.evidence_completeness < 80)'` to find the
+              specific VMs still missing evidence.
+            runbook_url: "https://github.com/JaredBurck/ocp-virt-bsod-detection/blob/main/docs/admin-runbook.md#fleet-evidence-completeness-exporter"
+            contact_first: "N/A -- this is a framework coverage gap, not a vendor-actionable BSOD trigger"
+            stop_codes: "N/A -- observability signal, not a BSOD-risk signal"
+          expr: bsod:fleet_evidence_completeness:ratio < 0.8
+          for: 30m
+          labels:
+            severity: warning
+            bsod_domain: coverage
+            kcs: "N/A"
+
+        # Alert: dead-man's switch for the fleet exporter itself (design doc
+        # docs/design/r-27-fleet-gate-verdict-exporter.md §6.7). Every other
+        # alert in this file reads metrics that keep flowing regardless of
+        # whether any BSOD-specific code is healthy (cAdvisor/kube-state-
+        # metrics is guaranteed by the platform) -- this component is
+        # different: if its pod crash-loops, or its RBAC is revoked, or `oc`
+        # starts failing, the entire gate-rollup signal goes silently stale,
+        # and BSODRisk_FleetEvidenceIncomplete simply stops evaluating rather
+        # than firing (an absent series alerts on nothing).
+        #
+        # Two alerts are required together, because they catch different
+        # failures -- this is only one of them:
+        #   - up{job="bsod-fleet-exporter"} == 0 -- standard Prometheus
+        #     self-monitoring via the ServiceMonitor, no new code needed.
+        #     Catches "the pod is gone." Not implemented as a rule here
+        #     (nothing to add -- see exporter/README.md's Alerting section
+        #     for the companion query to alert on directly).
+        #   - THIS alert catches "the pod is alive but every collection
+        #     attempt is failing" (e.g. a ClusterRole accidentally narrowed,
+        #     apiserver auth expired) -- `up` alone cannot distinguish this
+        #     from a healthy exporter, since the HTTP server keeps answering
+        #     scrapes even when collect_once() has failed every time.
+        - alert: BSODRisk_ExporterCollectionFailing
+          annotations:
+            summary: "BSOD fleet exporter is running but every collection attempt is failing"
+            description: |
+              scripts/cnv-bsod-fleet-exporter.sh's last_collection_success
+              gauge has been 0 for at least 15 minutes -- the exporter pod is
+              up and answering scrapes, but cnv-win-bsod-audit.sh --json has
+              not produced valid output in that window (RBAC narrowed,
+              apiserver auth expired, or the script itself is crashing). Every
+              per-VM evidence-completeness metric is now stale and
+              BSODRisk_FleetEvidenceIncomplete will not evaluate on fresh
+              data. Check `oc -n openshift-cnv logs deploy/bsod-fleet-exporter`
+              for the specific error.
+            runbook_url: "https://github.com/JaredBurck/ocp-virt-bsod-detection/blob/main/docs/admin-runbook.md#fleet-evidence-completeness-exporter"
+            contact_first: "N/A -- this is a framework/RBAC operational issue, not a vendor-actionable BSOD trigger"
+            stop_codes: "N/A -- observability signal, not a BSOD-risk signal"
+          expr: bsod_evidence_exporter_last_collection_success == 0
+          for: 15m
+          labels:
+            severity: warning
+            bsod_domain: coverage
+            kcs: "N/A"

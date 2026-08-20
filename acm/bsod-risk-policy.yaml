@@ -1,0 +1,3060 @@
+# GENERATED from canonical sources -- regenerate with:
+#   python3 scripts/ci/validate-acm-policy.py --update
+# Canonical sources:
+#   alerts/bsod-risk-prometheusrules.yaml
+#   alerts/bsod-risk-recording-rules.yaml
+#   alerts/bsod-risk-guest-alerts.yaml
+#   dashboards/bsod-risk-dashboard-configmap.yaml (via generate-dashboard-artifacts.sh)
+apiVersion: policy.open-cluster-management.io/v1
+kind: Policy
+metadata:
+  name: bsod-risk-detection
+  namespace: open-cluster-management-policies
+  annotations:
+    policy.open-cluster-management.io/categories: "CM Configuration Management"
+    policy.open-cluster-management.io/controls: "CM-2 Baseline Configuration"
+    policy.open-cluster-management.io/standards: "NIST SP 800-53"
+spec:
+  disabled: false
+  # L-10: ships as `inform`, deliberately. All four templates are additive
+  # (PrometheusRules + a dashboard ConfigMap in openshift-cnv; nothing touches
+  # VMs, nodes or cluster config), so `enforce` would not be destructive -- but
+  # it would push alerting thresholds to every matched managed cluster the
+  # moment the policy binds, with no per-cluster review. The storage-latency
+  # thresholds in particular are not yet empirically calibrated against a real
+  # Windows workload (see shared/storage-latency-thresholds.json
+  # "_calibration_status"), and the failure mode of a fleet-wide miscalibration
+  # is an alert storm across every cluster at once.
+  #
+  # Recommended rollout: apply as `inform`, review the compliance report, then
+  # enforce on ONE cluster, confirm alert volume is sane, and only then widen.
+  # To enforce, set this field and the four per-template ones below to
+  # `enforce`, or override per cluster with a PolicySet / placement override.
+  remediationAction: inform
+  policy-templates:
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: bsod-risk-prometheusrule
+          annotations:
+            policy.open-cluster-management.io/hub-templates: raw
+            policy.open-cluster-management.io/disable-templates: 'true'
+        spec:
+          remediationAction: inform
+          severity: high
+          namespaceSelector:
+            include:
+              - openshift-cnv
+          object-templates:
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: monitoring.coreos.com/v1
+                kind: PrometheusRule
+                metadata:
+                  name: bsod-risk-alerts
+                  namespace: openshift-cnv
+                  labels:
+                    prometheus: k8s
+                    role: alert-rules
+                    app.kubernetes.io/component: bsod-detection
+                spec:
+                  groups:
+                    - name: bsod-risk.rules
+                      rules:
+
+        # THRESHOLD SOURCE: shared/storage-latency-thresholds.json, bound by
+        # scripts/ci/validate-shared-thresholds.py. Editing a number here
+        # without the shared config (or vice versa) fails CI.
+        #
+        # H-5: these alerts previously fired at an hourly MEAN of 30 s/op. That
+        # is unreachable before the BSOD it predicts -- IoTimeoutValue is
+        # breached by an INDIVIDUAL slow I/O, and a one-hour mean of 30 s/op
+        # means the guest was unusable for an hour and already bugchecked. The
+        # framework's own analyzer flags the same quantity at 500ms, so the
+        # always-on customer-facing layer was ~60x LESS sensitive than the
+        # offline one. Now: 0.5 warning / 1.0 critical + a burst rule.
+
+        # Alert: Sustained elevated disk latency -- leading indicator
+        # Risk: MEMORY_MANAGEMENT (0x1A), KERNEL_DATA_INPAGE_ERROR (0x7A)
+        # KCS: 7132512
+        # NOTE: Uses recording rule bsod:vmi_disk_latency:avg_1h from
+        # alerts/bsod-risk-recording-rules.yaml. Deploy both CRs together.
+        # [KCS-VALIDATED]
+                        - alert: BSODRisk_StorageLatencyElevated
+                          annotations:
+                            summary: "VM disk I/O latency elevated -- storage degradation developing"
+                            description: |
+                              VM {{ $labels.name }} in namespace {{ $labels.namespace }} has averaged
+                              {{ $value | humanize }}s per disk I/O over the last hour on its WORST
+                              direction (read or write), at or above the 0.5s sustained-degradation threshold. This is a LEADING indicator: storage
+                              in this state produces the tail-latency spikes that breach the 60s VirtIO
+                              IoTimeoutValue and trigger MEMORY_MANAGEMENT (0x1A) or
+                              KERNEL_DATA_INPAGE_ERROR (0x7A).
+                              Action: investigate backing storage before latency worsens; consider
+                              raising IoTimeoutValue (see shared/io-timeout-thresholds.json).
+                            runbook_url: "https://access.redhat.com/solutions/7132512"
+                            contact_first: "Red Hat (if recent platform change) / Microsoft (if no changes)"
+                            stop_codes: "0x1A, 0x7A, 0x50, 0xEF"
+                            calibration_status: |
+                              This threshold (0.5s, shared/storage-latency-thresholds.json) was adopted by
+                              operator decision on 2026-07-28, replacing a defective 30s/op mean that could
+                              only fire after a Windows guest had already bugchecked. Calibration is PARTIAL
+                              (measured 2026-07-29 on a test/workshop cluster) -- see _calibration_status in
+                              shared/storage-latency-thresholds.json for what that measurement does and does
+                              not establish. If this alert fires or is persistently noisy/quiet for your
+                              storage backend, see the "Storage latency calibration" section in
+                              docs/admin-runbook.md before treating the threshold itself as ground truth.
+                          expr: |
+                            bsod:vmi_disk_latency:worst_1h >= 0.5
+                          for: 15m
+                          labels:
+                            severity: warning
+                            bsod_domain: storage
+                            kcs: "7132512"
+
+        # Alert: Severe sustained disk latency
+        # Risk: MEMORY_MANAGEMENT (0x1A), KERNEL_DATA_INPAGE_ERROR (0x7A)
+        # KCS: 7132512
+        # Supersedes the former 30 s/op rule, which this subsumes.
+        # [KCS-VALIDATED]
+                        - alert: BSODRisk_StorageLatencyHigh
+                          annotations:
+                            summary: "VM disk I/O latency severely degraded -- BSOD risk"
+                            description: |
+                              VM {{ $labels.name }} in namespace {{ $labels.namespace }} has averaged
+                              {{ $value | humanize }}s per disk I/O over the last hour on its WORST
+                              direction (read or write), at or above the 1.0s severe-degradation threshold. Individual I/Os in this regime routinely
+                              exceed the 60s VirtIO IoTimeoutValue, triggering MEMORY_MANAGEMENT (0x1A) or
+                              KERNEL_DATA_INPAGE_ERROR (0x7A) BSODs.
+                            runbook_url: "https://access.redhat.com/solutions/7132512"
+                            contact_first: "Red Hat (if recent platform change) / Microsoft (if no changes)"
+                            stop_codes: "0x1A, 0x7A, 0x50, 0xEF"
+                            calibration_status: |
+                              This threshold (1.0s, shared/storage-latency-thresholds.json) was adopted by
+                              operator decision on 2026-07-28, replacing a defective 30s/op mean that could
+                              only fire after a Windows guest had already bugchecked. Calibration is PARTIAL
+                              (measured 2026-07-29 on a test/workshop cluster) -- see _calibration_status in
+                              shared/storage-latency-thresholds.json for what that measurement does and does
+                              not establish. If this alert fires or is persistently noisy/quiet for your
+                              storage backend, see the "Storage latency calibration" section in
+                              docs/admin-runbook.md before treating the threshold itself as ground truth.
+                          expr: |
+                            bsod:vmi_disk_latency:worst_1h >= 1
+                          for: 10m
+                          labels:
+                            severity: critical
+                            bsod_domain: storage
+                            kcs: "7132512"
+
+        # Alert: Latency BURST -- tail-latency approximation
+        # Risk: MEMORY_MANAGEMENT (0x1A) -- this is the shape that actually
+        # breaches IoTimeoutValue.
+        # KCS: 7132512
+        # KubeVirt exposes no _bucket histograms (see CLAUDE.md), so true
+        # percentiles are unavailable. max_over_time() of a 5m rate surfaces
+        # spikes that the 1h mean erases -- the closest available proxy for p99.
+        # [KCS-VALIDATED]
+                        - alert: BSODRisk_StorageLatencyBurst
+                          annotations:
+                            summary: "VM disk I/O latency burst -- transient spike toward VirtIO timeout"
+                            description: |
+                              VM {{ $labels.name }} in namespace {{ $labels.namespace }} saw a 5-minute
+                              window averaging {{ $value | humanize }}s per disk I/O on its worst direction
+                              (read or write) within the last hour,
+                              at or above the 5s burst threshold -- even though its hourly mean may look
+                              healthy. Transient spikes of this shape are what breach the 60s VirtIO
+                              IoTimeoutValue and produce MEMORY_MANAGEMENT (0x1A) BSODs.
+                              NOTE: this is an APPROXIMATION of tail latency. KubeVirt does not expose
+                              histogram buckets, so a true p99 cannot be computed.
+                            runbook_url: "https://access.redhat.com/solutions/7132512"
+                            contact_first: "Red Hat (if recent platform change) / Microsoft (if no changes)"
+                            stop_codes: "0x1A, 0x7A, 0x50, 0xEF"
+                            calibration_status: |
+                              This threshold (5s, shared/storage-latency-thresholds.json) was adopted by
+                              operator decision on 2026-07-28. It is also a tail-latency APPROXIMATION (no
+                              true p99 available -- see NOTE above), and calibration is PARTIAL (measured
+                              2026-07-29 on a test/workshop cluster) -- see _calibration_status in
+                              shared/storage-latency-thresholds.json for what that measurement does and does
+                              not establish. If this alert fires or is persistently noisy/quiet for your
+                              storage backend, see the "Storage latency calibration" section in
+                              docs/admin-runbook.md before treating the threshold itself as ground truth.
+                          expr: |
+                            max_over_time(
+                              max by (name, namespace, drive) (
+                                label_replace(
+                                  sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_read_times_seconds_total[5m]))
+                                    /
+                                  sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_read_total[5m])),
+                                  "direction", "read", "", "")
+                                or
+                                label_replace(
+                                  sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_write_times_seconds_total[5m]))
+                                    /
+                                  sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_write_total[5m])),
+                                  "direction", "write", "", "")
+                              )[1h:5m]
+                            ) >= 5
+                          for: 0m
+                          labels:
+                            severity: critical
+                            bsod_domain: storage
+                            kcs: "7132512"
+
+        # Alert: VM memory utilization sustained above 85%
+        # Risk: Amplifies storage-related BSODs via pagefile pressure
+        # KCS: 7132512
+        # [GENERAL-KNOWLEDGE]
+                        - alert: BSODRisk_MemoryPressure
+                          annotations:
+                            summary: "VM memory pressure increases BSOD risk"
+                            description: |
+                              VM {{ $labels.name }} in namespace {{ $labels.namespace }} has sustained
+                              memory utilization above 85% for 30 minutes. Pagefile pressure on slow
+                              storage amplifies MEMORY_MANAGEMENT (0x1A) BSOD risk.
+                            runbook_url: "https://access.redhat.com/solutions/7132512"
+                            contact_first: "Microsoft (if no recent platform changes)"
+                            stop_codes: "0x1A"
+                          expr: |
+                            (
+                              kubevirt_vmi_memory_used_bytes
+                              / on(name, namespace) kubevirt_vmi_memory_domain_bytes
+                            ) > 0.85
+                            and on(name, namespace)
+                            kubevirt_vmi_memory_domain_bytes > 0
+                            and on(name, namespace)
+                            kubevirt_vmi_info{os=~"windows|win.*"}
+                          for: 30m
+                          labels:
+                            severity: warning
+                            bsod_domain: resource
+                            kcs: "7132512"
+
+        # Alert: Guest OS panic detected via QMP GUEST_PANICKED event
+        # Risk: Direct BSOD detection, if/when this metric ships.
+        # KCS: 7141291
+        # [UNVALIDATED] -- kubevirt_vmi_guest_os_panic_total does not exist on
+        # ANY shipping OpenShift Virtualization release as of this writing
+        # (confirmed absent via direct Prometheus/API query on a live OCP
+        # Virt 4.19.25 cluster, 2026-07-10). Upstream KubeVirt added the
+        # metric itself in kubevirt/kubevirt#17836 and a first alert
+        # consuming it (VMNonRecoverableOSPanic) only merged 2026-06-30
+        # (kubevirt/kubevirt#18004) -- neither has reached a released HCO/CNV
+        # build yet. This alert is a forward-looking placeholder: it is
+        # harmless to ship (it simply never fires) but MUST NOT be presented
+        # to customers as a working detection mechanism today.
+        # Reliable alternative until this metric ships: virt-launcher QMP
+        # log analysis via must-gather, see insights-rules/plugins/
+        # bsod_crashdump_checks.py (has_guest_panicked/has_guest_crashloaded),
+        # which parses GUEST_PANICKED/GUEST_CRASHLOADED events directly from
+        # logs and does not depend on this metric at all.
+                        - alert: BSODRisk_GuestCrash
+                          annotations:
+                            summary: "Windows VM BSOD detected -- pre-crash risk context available"
+                            description: |
+                              VM {{ $labels.name }} in namespace {{ $labels.namespace }} triggered a
+                              guest OS panic event (GUEST_PANICKED or GUEST_CRASHLOADED via QMP).
+                              This indicates a Windows BSOD has occurred. If GUEST_PANICKED (not
+                              CRASHLOADED), no memory dump was generated -- check for VirtIO VGA
+                              adapter (KCS-7141988).
+                              Immediate actions:
+                                1. Run: cnv-win-bsod-audit.sh {{ $labels.namespace }} {{ $labels.name }}
+                                2. Collect guest crash dump: cnv-qga-fleet-collect.sh --namespace {{ $labels.namespace }} --vm {{ $labels.name }} --stage
+                                3. Open Red Hat support case with gate report + crash dump
+                              Pre-crash risk factors available via: bsod:vm_risk_factor_count:gauge
+                            runbook_url: "https://access.redhat.com/solutions/7141291"
+                            contact_first: "Red Hat (if recent virtio-win update or migration) / Microsoft (if no changes)"
+                            stop_codes: "varies (check Windows minidump or virt-launcher logs)"
+                            status: |
+                              PREVIEW -- this alert depends on kubevirt_vmi_guest_os_panic_total,
+                              which no released HCO/CNV build exposes as of 2026-07-28. It cannot
+                              fire on any currently shipping OpenShift Virtualization release.
+                              Do not treat a quiet BSODRisk_GuestCrash as evidence that no guest
+                              has crashed. Inspect virt-launcher logs for GUEST_PANICKED /
+                              GUEST_CRASHLOADED and attach them with gate --json to the support
+                              case. If this alert DOES fire, the metric has shipped and this
+                              rule has never been exercised against real data -- verify against
+                              virt-launcher logs before acting on it.
+                          expr: |
+                            increase(kubevirt_vmi_guest_os_panic_total[5m]) > 0
+                          for: 0m
+                          labels:
+                            severity: critical
+                            bsod_domain: crash
+                            kcs: "7141291"
+            # L-8: machine-readable so Alertmanager routing, ACM policies and
+            # dashboards can filter preview rules without parsing annotations.
+            # Shipping it enabled is safe (the metric does not exist, so it
+            # never fires); shipping it INDISTINGUISHABLE from a working
+            # detection is not, because a silent alert reads as "no crashes".
+                            bsod_status: preview
+
+        # Alert: VM migration on heterogeneous CPU cluster (R-9, replaces
+        # BSODRisk_RecentVMMigrationDetected from v0.10.0; renamed in v0.11.0).
+        # Risk: CLOCK_WATCHDOG_TIMEOUT (0x101), MACHINE_CHECK_EXCEPTION (0x9C)
+        # Fires when: a migration reaches Running phase AND the cluster has
+        # heterogeneous CPU vendors (bsod:cluster_cpu_model_count:gauge > 1).
+        # On homogeneous clusters (count==1), migration alone does not fire.
+        # On clusters without CPU-vendor labels (count==0, e.g. pre-OCP 4.14
+        # without kube-state-metrics allowlist), the alert does NOT fire --
+        # acceptable because absence of vendor labels implies KubeVirt is not
+        # fully configured. Deploy kube-state-metrics node label allowlist for
+        # full R-9 coverage (see operator-runbook.md).
+        # Detects BOTH vendor and intra-vendor generation heterogeneity via
+        # CPU capability signatures (see the recording rule's comment). Verified
+        # on a live all-AMD Rome+Milan cluster where the previous vendor-count
+        # expression returned 1 and this returns 2.
+        # LIMITATION: two generations sharing all sampled feature labels group
+        # together; full per-node comparison remains offline via
+        # BSOD_CPU_CPU_MODEL_MIGRATION.
+        # [GENERAL-KNOWLEDGE]
+                        - alert: BSODRisk_HeterogeneousCPUMigration
+                          annotations:
+                            summary: "VM migration on heterogeneous CPU cluster -- BSOD risk"
+                            description: |
+                              A VirtualMachineInstance migration reached the Running phase on a cluster
+                              with heterogeneous CPU capability groups (differing CPU feature sets --
+                              mixed vendors OR mixed generations of the same vendor, e.g. EPYC Rome
+                              alongside EPYC Milan). Migrations across mixed CPU
+                              architectures can trigger CLOCK_WATCHDOG_TIMEOUT (0x101) or
+                              MACHINE_CHECK_EXCEPTION (0x9C) on Windows VMs. Verify that source and
+                              target node CPU features are compatible. Run:
+                                cnv-win-bsod-audit.sh <namespace> <vm-name>
+                              Compare worker `cpu-feature.node.kubevirt.io/*` labels if Gate 4 WARNs;
+                              attach `--json` to the support case.
+                            runbook_url: "https://access.redhat.com/solutions/7125237"
+                            contact_first: "Red Hat"
+                            stop_codes: "0x101, 0x9C"
+                          expr: |
+                            increase(kubevirt_vmi_migration_phase_transition_time_from_creation_seconds_count{phase="Running"}[5m]) > 0
+                            and on()
+                            bsod:cluster_cpu_model_count:gauge > 1
+                          for: 0m
+                          labels:
+                            severity: warning
+                            bsod_domain: cpu
+                            kcs: "7125237"
+
+        # Alert: AMD node detected -- manual microcode verification required
+        # Risk: PFN_LIST_CORRUPT (0x4E) on outdated AMD microcode
+        # KCS: 7132511
+        # NOTE: No microcode version metric exists in Prometheus. This alert
+        # identifies AMD nodes that require manual verification via node debug.
+        # PREREQUISITE: kube-state-metrics must have the KubeVirt CPU-vendor
+        # labels in --metric-labels-allowlist. On stock OCP, this is NOT enabled
+        # by default. See operator-runbook.md for configuration instructions.
+        # Without the allowlist, this alert will never fire.
+        # NAMESPACE LABEL: this alert is node-scoped, not VM-scoped -- Nodes
+        # aren't namespaced Kubernetes objects. Left un-aggregated, the raw
+        # `kube_node_labels` series carries a `namespace` label that is pure
+        # scrape-target metadata (the namespace kube-state-metrics itself runs
+        # in, i.e. openshift-monitoring), NOT a VM's namespace. `count by
+        # (node)` strips that (and every other kube-state-metrics/cpu-feature
+        # label) so consumers -- e.g. the "All Firing Alerts (Detail)" Grafana
+        # panel -- don't misread it as a VM namespace. See
+        # docs/operator-runbook.md's Alert Response Guide.
+        # [KCS-VALIDATED] -- KCS confirms AMD microcode risk, but alert is advisory only
+                        - alert: BSODRisk_AMDNodeRequiresMicrocodeVerification
+                          annotations:
+                            summary: "AMD node detected -- verify microcode version manually"
+                            description: |
+                              Node {{ $labels.node }} is running AMD CPUs. No Prometheus metric exposes
+                              microcode version; manual verification is required. Use
+                              'oc debug node/{{ $labels.node }} -- cat /proc/cpuinfo | grep microcode'
+                              to verify version is >= 0xb002151. Outdated AMD microcode can trigger
+                              PFN_LIST_CORRUPT (0x4E) BSODs on Windows VMs.
+                            runbook_url: "https://access.redhat.com/solutions/7132511"
+                            contact_first: "Red Hat"
+                            stop_codes: "0x4E"
+                            prerequisite: |
+                              This alert requires kube_node_labels to include KubeVirt CPU-vendor node labels.
+                              On OCP 4.14+ (kube-state-metrics with nodes=[*] allowlist), these are exposed by
+                              default. On older versions, configure via:
+                              oc -n openshift-monitoring edit configmap cluster-monitoring-config
+                              Add: kubeStateMetrics.metricLabelsAllowlist.nodes=[cpu-vendor.node.kubevirt.io/*]
+                            resolution: |
+                              After verifying microcode >= 0xb002151 on this node, acknowledge it:
+                                oc label node {{ $labels.node }} bsod-microcode-verified=true
+                              The alert then resolves for that node. Remove the label (or set it
+                              to any other value) to re-open verification after a firmware or
+                              microcode change.
+          # L-7: previously `... amd="true"}) > 0`, which is an inventory fact,
+          # not an alert condition -- it fired from the moment an AMD node
+          # joined and never resolved, because nothing it measures can change.
+          # A permanently-firing alert is worse than no alert: it trains
+          # operators to ignore the row and it crowds real findings out of
+          # "currently firing" views. There is no microcode metric to key off,
+          # so the acknowledgement is an operator-applied node label -- which
+          # gives the alert the one thing it lacked, a way to become false.
+                          expr: |
+                            count by (node) (
+                              kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true",
+                                               label_bsod_microcode_verified!="true"}
+                            ) > 0
+                          for: 30m
+                          labels:
+                            severity: info
+                            bsod_domain: cpu
+                            kcs: "7132511"
+
+        # Alert: Storage latency trending upward (sustained AND increasing)
+        # Risk: Gradual storage degradation leading to BSOD
+        # KCS: 7132512
+        # [KCS-VALIDATED] -- same root cause as StorageLatencyHigh but trending-aware
+                        - alert: BSODRisk_StorageLatencyTrending
+                          annotations:
+                            summary: "VM storage latency trending upward toward BSOD threshold"
+                            description: |
+                              VM {{ $labels.name }} in namespace {{ $labels.namespace }} has average
+                              worst-direction (read or write) disk latency at or above 0.5s AND it has increased by more than 50%
+                              over the 24-hour baseline. This sustained upward trend indicates storage
+                              degradation heading toward the 60s VirtIO IoTimeoutValue.
+                            runbook_url: "https://access.redhat.com/solutions/7132512"
+                            contact_first: "Red Hat (if recent platform change) / Microsoft (if no changes)"
+                            stop_codes: "0x1A, 0x7A, 0x50, 0xEF"
+                          expr: |
+                            bsod:vmi_disk_latency:worst_1h >= 0.5
+                            and
+                            (bsod:vmi_disk_latency:worst_1h / bsod:vmi_disk_latency:worst_24h) > 1.5
+                          for: 30m
+                          labels:
+                            severity: warning
+                            bsod_domain: storage
+                            kcs: "7132512"
+
+        # Alert: Windows VM cannot be safely evicted (migration blocked)
+        # Risk: Node drain will hang then force-kill -- dirty shutdown / BSOD
+        # NOTE: kubevirt_vmi_info 'evictable' label reflects whether the VMI
+        # CAN be safely disrupted during a node drain. evictable="false" means
+        # the VM has evictionStrategy=LiveMigrate but migration is BLOCKED by
+        # device or feature constraints (e.g. persistent TPM, host-passthrough,
+        # missing TSC frequency labels). Node drains will hang at the PDB,
+        # then force-delete the pod after the drain timeout -- causing a dirty
+        # shutdown indistinguishable from a BSOD.
+        #
+        # LIMITATION: This alert does NOT detect evictionStrategy=None (which
+        # Prometheus reports as evictable="true" because the pod CAN be
+        # evicted). For evictionStrategy=None detection, use the cluster-side
+        # BSOD audit gate script (Gate 6) or the Python analysis engine.
+        # [GENERAL-KNOWLEDGE]
+                        - alert: BSODRisk_EvictionBlocked
+                          annotations:
+                            summary: "Windows VM live migration blocked -- node drain will force-stop"
+                            description: |
+                              Windows VM {{ $labels.name }} in namespace {{ $labels.namespace }} has
+                              evictionStrategy=LiveMigrate but is NOT live-migratable (evictable="false").
+                              Common causes: persistent TPM, missing TSC frequency scheduling labels,
+                              host-passthrough CPU model, or passthrough devices. On node drain, the
+                              PodDisruptionBudget will block eviction, and after the drain timeout the pod
+                              will be force-deleted -- causing a dirty shutdown that can trigger or
+                              masquerade as a BSOD. Either resolve the migration blocker or set
+                              evictionStrategy to LiveMigrateIfPossible so the VM can be stopped gracefully.
+                            runbook_url: "https://access.redhat.com/solutions/7132512"
+                            contact_first: "Red Hat (migration infrastructure issue)"
+                            stop_codes: "N/A (dirty shutdown, not a true BSOD)"
+                          expr: |
+                            kubevirt_vmi_info{evictable="false",os=~"windows|win.*"} == 1
+                          for: 5m
+                          labels:
+                            severity: warning
+                            bsod_domain: config
+                            kcs: "7132512"
+
+        # Alert: virt-launcher pods capped by their OWN CPU limit
+        # Risk: CLOCK_WATCHDOG_TIMEOUT (0x101), MACHINE_CHECK_EXCEPTION (0x9C)
+        # KCS: 7132511 (general overcommit guidance)
+        # THRESHOLD SOURCE: shared/host-contention-thresholds.json, bound by
+        # scripts/ci/validate-shared-thresholds.py.
+        #
+        # RENAMED IN v0.26.0 (peer-review F-02). This rule shipped as
+        # BSODRisk_HostCPUContention, which is not what it measures. Two
+        # problems, both proven with promtool:
+        #
+        #  1. IT CANNOT FIRE ON A DEFAULT CLUSTER. cAdvisor populates the CFS
+        #     period/throttle counters only when the cgroup carries a CPU
+        #     bandwidth quota -- i.e. only when a CPU *limit* is set. KubeVirt
+        #     sets CPU requests, not limits, on virt-launcher unless the VM
+        #     specifies resources.limits.cpu or uses dedicatedCpuPlacement. On
+        #     a default cluster both sums are 0, the ratio is 0/0 -> NaN, and
+        #     `NaN > 0.25` is false. The alert was SILENT at 100% node
+        #     contention -- the exact condition it claimed to detect.
+        #
+        #  2. THE SEMANTICS WERE INVERTED. CFS throttling measures a pod being
+        #     capped by its OWN limit, which is frequently benign and is not
+        #     node contention. A node oversubscribed on requests with no limits
+        #     -- the standard overcommit posture, and the noisy-neighbour case
+        #     this was meant to catch -- throttles ZERO. Conversely one limited
+        #     pod exceeding its quota on an idle node fired it and blamed the
+        #     node.
+        #
+        # The expression is unchanged and correct for the condition it really
+        # detects, so it is kept under an honest name. BSODRisk_HostCPUContention
+        # below now carries the node-contention signal via PSI.
+        #
+        # The `and on(node) ... > 0` guard makes the missing-denominator case
+        # explicit: without it, "no CPU limit anywhere" and "limits set, no
+        # throttling" are both NaN and indistinguishable.
+        #
+        # [GENERAL-KNOWLEDGE] -- the 25% threshold is UNCALIBRATED (see
+        # shared/host-contention-thresholds.json's _calibration_status).
+                        - alert: BSODRisk_VirtLauncherCPUThrottled
+                          annotations:
+                            summary: "virt-launcher pod(s) on this node are being throttled by their own CPU limit"
+                            description: |
+                              Node {{ $labels.node }} shows sustained CFS CPU throttling on
+                              virt-launcher pods: {{ $value | humanizePercentage }} of
+                              scheduling periods were throttled over the last 5 minutes, at or
+                              above the 25% threshold. This means those pods are hitting their
+                              CONFIGURED CPU LIMIT -- it is not a measure of node-level
+                              contention (see BSODRisk_HostCPUContention for that). Windows
+                              guests are far more sensitive to scheduling jitter than Linux
+                              guests, so sustained throttling can still trigger
+                              CLOCK_WATCHDOG_TIMEOUT (0x101) or MACHINE_CHECK_EXCEPTION (0x9C).
+                              Action: raise or remove the CPU limit on the affected VMs, or
+                              reduce their vCPU demand.
+                            runbook_url: "https://access.redhat.com/solutions/7132511"
+                            contact_first: "Red Hat (if recent scheduling/density change) / Microsoft (if no changes)"
+                            stop_codes: "0x101, 0x9C"
+                            prerequisite: |
+                              Only produces series for virt-launcher pods that have a CPU LIMIT
+                              set (resources.limits.cpu, or dedicatedCpuPlacement). KubeVirt
+                              sets requests but not limits by default, so on a stock cluster
+                              this alert is correctly silent -- there is no quota to exceed.
+                              That is a real limitation, not a bug: see
+                              shared/alert-liveness.json.
+                            calibration_status: |
+                              This threshold (25% throttle ratio, shared/host-contention-thresholds.json)
+                              is UNCALIBRATED -- adopted as a starting point pending a live
+                              induced-contention validation run (constrain a virt-launcher
+                              pod's CPU limit below its demand and confirm the alert fires and
+                              clears). See _calibration_status in
+                              shared/host-contention-thresholds.json for what remains
+                              unestablished, and docs/admin-runbook.md's "Storage latency
+                              calibration" section for the calibration workflow this alert
+                              will follow once a live run is completed.
+                          expr: |
+                            (
+                              sum by (node) (rate(container_cpu_cfs_throttled_periods_total{pod=~"virt-launcher-.*"}[5m]))
+                              /
+                              sum by (node) (rate(container_cpu_cfs_periods_total{pod=~"virt-launcher-.*"}[5m]))
+                            ) > 0.25
+                            and on(node)
+                            sum by (node) (rate(container_cpu_cfs_periods_total{pod=~"virt-launcher-.*"}[5m])) > 0
+                          for: 10m
+                          labels:
+                            severity: warning
+                            bsod_domain: cpu
+                            kcs: "7132511"
+
+        # Alert: genuine node-level CPU contention, via PSI
+        # Risk: CLOCK_WATCHDOG_TIMEOUT (0x101), MACHINE_CHECK_EXCEPTION (0x9C)
+        # KCS: 7132511 (general overcommit guidance)
+        # THRESHOLD SOURCE: shared/host-contention-thresholds.json
+        # (psi_cpu_waiting_ratio_warn), bound by
+        # scripts/ci/validate-shared-thresholds.py.
+        #
+        # ADDED IN v0.26.0 (peer-review F-02) to replace the CFS-based signal
+        # that used to carry this name, then CORRECTED against a live cluster
+        # before release (OCP 4.18.26 / CNV 4.18.45, ARO, 2026-08-19).
+        #
+        # The first implementation used Linux PSI
+        # (node_pressure_cpu_waiting_seconds_total). PSI IS ABSENT ON THAT
+        # CLUSTER -- no node_pressure_* series exist at all, though
+        # node_exporter is running and healthy. Shipping it would have
+        # reproduced F-02 exactly: an alert named for a risk it cannot
+        # observe. That the risk was recorded as "unconfirmed" rather than
+        # assumed is the only reason it was checked before release.
+        #
+        # node_schedstat_waiting_seconds_total IS present (72 series, all 6
+        # nodes). It is /proc/schedstat's run-queue wait time: the aggregate
+        # seconds tasks spent waiting for a CPU, per CPU. Like PSI -- and
+        # unlike the CFS counters -- it is populated regardless of whether any
+        # cgroup carries a bandwidth quota, so it works on the default KubeVirt
+        # posture (requests, no limits), which is precisely the configuration
+        # under which overcommit happens and the old alert was blind.
+        #
+        # UNITS DIFFER FROM PSI, which is why the threshold moved from 0.25 to
+        # 1.0. PSI reports a 0-1 stall fraction; schedstat reports aggregate
+        # task-wait seconds per second, which is unbounded above. avg by
+        # (instance) normalises across a node's CPUs, so the value reads as
+        # "average number of tasks queued per CPU". Carrying 0.25 across would
+        # have been badly wrong: measured over 24h on the live cluster the
+        # KubeVirt workers hit p95 0.243, p99 0.305, max 0.431 while
+        # essentially idle, and spent 4.9% of the window above 0.25. See
+        # shared/host-contention-thresholds.json for the full measurement.
+        #
+        # SCOPED to KubeVirt nodes, which the PSI version deliberately was not.
+        # node_exporter labels series with `instance` and kube-state-metrics
+        # with `node`; the concern was that a join matching nothing would
+        # produce silence -- the exact F-02 failure. Live check settled it:
+        # both carry the plain node name, so label_replace normalises them
+        # cleanly. Verified on-cluster to return exactly the 3 KubeVirt workers
+        # out of 6 nodes. With the topology confirmed the scoping is safe, and
+        # it removes the infra-node noise the unscoped version accepted.
+        #
+        # [GENERAL-KNOWLEDGE] -- CPU starvation triggering these stop codes on
+        # Windows guests is established virtualization practice. The 1.0
+        # threshold is PARTIALLY calibrated: a real baseline was measured, but
+        # no induced-contention run has established what level actually harms a
+        # Windows guest. See shared/host-contention-thresholds.json.
+                        - alert: BSODRisk_HostCPUContention
+                          annotations:
+                            summary: "Node-level CPU contention -- runnable tasks are waiting for CPU"
+                            description: |
+                              KubeVirt node {{ $labels.instance }} averaged {{ $value | humanize }}
+                              tasks queued per CPU over the last 5 minutes (run-queue wait time
+                              from /proc/schedstat), at or above the threshold of 1. Windows VMs
+                              on this node may experience scheduling delays severe enough to
+                              trigger CLOCK_WATCHDOG_TIMEOUT (0x101) or MACHINE_CHECK_EXCEPTION
+                              (0x9C). Investigate node-level CPU overcommit: reduce VM density
+                              on this node, or raise CPU requests so the scheduler stops packing
+                              it.
+                              Unlike BSODRisk_VirtLauncherCPUThrottled, this fires on real
+                              contention even when no CPU limits are set -- which is the default
+                              KubeVirt configuration, and the case that alert cannot see.
+                            runbook_url: "https://access.redhat.com/solutions/7132511"
+                            contact_first: "Red Hat (if recent scheduling/density change) / Microsoft (if no changes)"
+                            stop_codes: "0x101, 0x9C"
+                            prerequisite: |
+                              Requires node_exporter (present in OCP's default monitoring stack)
+                              and kube-state-metrics exposing KubeVirt node labels (the OCP
+                              4.14+ nodes=[*] default). Both confirmed present on OCP 4.18.26 /
+                              CNV 4.18.45.
+                              NOTE: this alert originally used Linux PSI
+                              (node_pressure_cpu_waiting_seconds_total), which is ABSENT on that
+                              cluster -- no node_pressure_* series exist at all. If you are
+                              adapting this rule, do not assume PSI is available just because
+                              node_exporter is running. Verify a signal exists before relying on
+                              it:
+                                oc get route -n openshift-monitoring thanos-querier
+                                curl -H "Authorization: Bearer $(oc whoami -t)" \
+                                  --data-urlencode 'query=count(node_schedstat_waiting_seconds_total)' \
+                                  https://<thanos-host>/api/v1/query
+                            calibration_status: |
+                              PARTIAL (2026-08-19). A real baseline WAS measured: over 24h on a
+                              live OCP 4.18.26 / CNV 4.18.45 cluster the KubeVirt worker nodes
+                              ran p50 0.0589, p95 0.243, p99 0.305, max 0.431 -- so the 1.0
+                              threshold sits 2.3x above the observed peak and the nodes spent 0%
+                              of the window above it. That establishes the threshold does not
+                              FALSE-POSITIVE on a lightly-loaded cluster.
+                              It does NOT establish that 1.0 CATCHES contention severe enough to
+                              bugcheck a Windows guest -- that needs an induced-contention run,
+                              which has not been done. Nor is a near-idle cluster (its VMs were
+                              not running) representative of production density. Treat a firing
+                              instance as a prompt to investigate, not a measured verdict. See
+                              _calibration_status in shared/host-contention-thresholds.json.
+                          expr: |
+                            avg by (instance) (rate(node_schedstat_waiting_seconds_total[5m]))
+                            * on(instance) group_left()
+                            (
+                              count by (instance) (
+                                label_replace(kube_node_labels{label_cpu_vendor_node_kubevirt_io_intel="true"}, "instance", "$1", "node", "(.*)")
+                                or
+                                label_replace(kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true"}, "instance", "$1", "node", "(.*)")
+                              ) > 0
+                            ) > 1
+                          for: 10m
+                          labels:
+                            severity: warning
+                            bsod_domain: cpu
+                            kcs: "7132511"
+
+        # Alert: Fleet-wide evidence completeness below threshold
+        # Risk: NONE DIRECTLY -- this is an OBSERVABILITY/coverage alert, not a
+        # BSOD-trigger alert. It says "we might be blind to risk on a large
+        # part of the fleet", not "there is risk". Every other alert in this
+        # file makes a BSOD-trigger claim tagged by confidence tier per
+        # CLAUDE.md; this one deliberately does not, hence no stop_codes and
+        # kcs: "N/A" below.
+        # THRESHOLD SOURCE: shared/evidence-completeness-thresholds.json
+        # (fleet_warn_below_pct, stored as a 0-100 percent for readability),
+        # bound by scripts/ci/validate-shared-thresholds.py -- the literal
+        # below (0.8) is that same 80 divided by 100, since the recording
+        # rule it reads is a 0-1 ratio (see bsod:fleet_evidence_completeness:ratio's
+        # own comment for why raw counts + a ratio, not an unweighted percent
+        # average).
+        # NOTE: Uses recording rule bsod:fleet_evidence_completeness:ratio from
+        # alerts/bsod-risk-recording-rules.yaml. Deploy both CRs together.
+        # Requires: scripts/cnv-bsod-fleet-exporter.sh deployed and scraped
+        # (see exporter/ for the Deployment/Service/ServiceMonitor manifests).
+        # Issue K (docs/info/peer-reviews/v0.19.0/issues/
+        # gitlab-issue-drafts-open-after-remediation.md) / R-27 (MASTER-
+        # remediation-plan.md's "continuous gate-verdict export").
+        # [UNVALIDATED] -- see shared/evidence-completeness-thresholds.json's
+        # _calibration_status; the 80% threshold is a reasoned starting point,
+        # not a measured one.
+                        - alert: BSODRisk_FleetEvidenceIncomplete
+                          annotations:
+                            summary: "Fleet-wide BSOD evidence completeness below the configured threshold"
+                            description: |
+                              Checks-weighted evidence completeness across the fleet is
+                              {{ $value | humanizePercentage }}, below the 80% threshold. This
+                              means a significant share of the checks this framework tries to
+                              run per Windows VM are not reaching a verdict (UNKNOWN, not a
+                              pass) -- typically because guest-side evidence (QEMU Guest
+                              Agent, windows_exporter) is not deployed or not running on a
+                              large part of the fleet. This alert does NOT mean BSOD risk is
+                              present -- it means the framework's other alerts and gates may
+                              be running mostly blind on the affected VMs. Deploy/repair the
+                              QEMU Guest Agent and/or windows_exporter fleet-wide, then
+                              re-check `cnv-win-bsod-audit.sh --all-namespaces --json | jq
+                              '.vms[] | select(.evidence_completeness < 80)'` to find the
+                              specific VMs still missing evidence.
+                            runbook_url: "https://github.com/JaredBurck/ocp-virt-bsod-detection/blob/main/docs/admin-runbook.md#fleet-evidence-completeness-exporter"
+                            contact_first: "N/A -- this is a framework coverage gap, not a vendor-actionable BSOD trigger"
+                            stop_codes: "N/A -- observability signal, not a BSOD-risk signal"
+                          expr: bsod:fleet_evidence_completeness:ratio < 0.8
+                          for: 30m
+                          labels:
+                            severity: warning
+                            bsod_domain: coverage
+                            kcs: "N/A"
+
+        # Alert: dead-man's switch for the fleet exporter itself (design doc
+        # docs/design/r-27-fleet-gate-verdict-exporter.md §6.7). Every other
+        # alert in this file reads metrics that keep flowing regardless of
+        # whether any BSOD-specific code is healthy (cAdvisor/kube-state-
+        # metrics is guaranteed by the platform) -- this component is
+        # different: if its pod crash-loops, or its RBAC is revoked, or `oc`
+        # starts failing, the entire gate-rollup signal goes silently stale,
+        # and BSODRisk_FleetEvidenceIncomplete simply stops evaluating rather
+        # than firing (an absent series alerts on nothing).
+        #
+        # Two alerts are required together, because they catch different
+        # failures -- this is only one of them:
+        #   - up{job="bsod-fleet-exporter"} == 0 -- standard Prometheus
+        #     self-monitoring via the ServiceMonitor, no new code needed.
+        #     Catches "the pod is gone." Not implemented as a rule here
+        #     (nothing to add -- see exporter/README.md's Alerting section
+        #     for the companion query to alert on directly).
+        #   - THIS alert catches "the pod is alive but every collection
+        #     attempt is failing" (e.g. a ClusterRole accidentally narrowed,
+        #     apiserver auth expired) -- `up` alone cannot distinguish this
+        #     from a healthy exporter, since the HTTP server keeps answering
+        #     scrapes even when collect_once() has failed every time.
+                        - alert: BSODRisk_ExporterCollectionFailing
+                          annotations:
+                            summary: "BSOD fleet exporter is running but every collection attempt is failing"
+                            description: |
+                              scripts/cnv-bsod-fleet-exporter.sh's last_collection_success
+                              gauge has been 0 for at least 15 minutes -- the exporter pod is
+                              up and answering scrapes, but cnv-win-bsod-audit.sh --json has
+                              not produced valid output in that window (RBAC narrowed,
+                              apiserver auth expired, or the script itself is crashing). Every
+                              per-VM evidence-completeness metric is now stale and
+                              BSODRisk_FleetEvidenceIncomplete will not evaluate on fresh
+                              data. Check `oc -n openshift-cnv logs deploy/bsod-fleet-exporter`
+                              for the specific error.
+                            runbook_url: "https://github.com/JaredBurck/ocp-virt-bsod-detection/blob/main/docs/admin-runbook.md#fleet-evidence-completeness-exporter"
+                            contact_first: "N/A -- this is a framework/RBAC operational issue, not a vendor-actionable BSOD
+                              trigger"
+                            stop_codes: "N/A -- observability signal, not a BSOD-risk signal"
+                          expr: bsod_evidence_exporter_last_collection_success == 0
+                          for: 15m
+                          labels:
+                            severity: warning
+                            bsod_domain: coverage
+                            kcs: "N/A"
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: bsod-risk-recording-rules
+          annotations:
+            policy.open-cluster-management.io/hub-templates: raw
+            policy.open-cluster-management.io/disable-templates: 'true'
+        spec:
+          remediationAction: inform
+          severity: high
+          namespaceSelector:
+            include:
+              - openshift-cnv
+          object-templates:
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: monitoring.coreos.com/v1
+                kind: PrometheusRule
+                metadata:
+                  name: bsod-risk-recording-rules
+                  namespace: openshift-cnv
+                  labels:
+                    prometheus: k8s
+                    role: recording-rules
+                    app.kubernetes.io/component: bsod-detection
+                spec:
+                  groups:
+                    - name: bsod-risk.recording
+                      interval: 5m
+                      rules:
+        # KubeVirt exposes _total counters, not _bucket histograms.
+        # Derive average read latency = total_time / total_ops.
+        # Use sum by() to aggregate across instance/pod label churn
+        # from virt-handler restarts or VM rescheduling, which would
+        # otherwise cause the on() join to fail as many-to-many.
+        # Guard denominator > 0 so idle disks do not emit NaN/Inf series.
+                        - record: bsod:vmi_disk_latency:avg_1h
+                          expr: |
+                            (
+                              sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_read_times_seconds_total[1h]))
+                                /
+                              sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_read_total[1h]))
+                            )
+                            and
+                            sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_read_total[1h])) > 0
+
+                        - record: bsod:vmi_disk_latency:avg_24h
+                          expr: |
+                            (
+                              sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_read_times_seconds_total[24h]))
+                                /
+                              sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_read_total[24h]))
+                            )
+                            and
+                            sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_read_total[24h])) > 0
+
+        # WRITE-PATH TWINS (F-01, v0.25.0 peer review).
+        #
+        # Until v0.26.0 every storage-latency signal in this framework's
+        # always-on layer derived exclusively from the READ counters -- a
+        # repo-wide search for kubevirt_vmi_storage_write_times_seconds_total
+        # returned zero hits across the alerts, these recording rules, the ACM
+        # policy, the dashboards and the calibration script. The offline Python
+        # analyzer was already correct (bsod_storage_checks.py evaluates
+        # max(read_latency_ms, write_latency_ms)), so the customer-facing
+        # always-on layer was blind to a risk the Red Hat-only layer caught --
+        # the same "coverage inversion" this file names in the CPU-heterogeneity
+        # comment below, and the same shape as the H-5 defect recorded in
+        # shared/storage-latency-thresholds.json.
+        #
+        # WHY IT MATTERS CLINICALLY: the 60s VirtIO IoTimeoutValue these alerts
+        # exist to predict is DIRECTION-AGNOSTIC -- a write stalling past it
+        # trips viostor/vioscsi exactly as a read does. On the replicated
+        # backends this framework targets (ODF/Ceph RBD), a read may be served
+        # by a single OSD while a write must be acknowledged by every replica,
+        # so during recovery, backfill or an OSD flap write latency can rise by
+        # an order of magnitude while read latency stays nominal. Crash-dump
+        # capture is itself a write, so write starvation both causes the
+        # bugcheck and destroys the evidence of it.
+        #
+        # Same denominator guard and same by() labels as the read twins, so
+        # they join cleanly under max() in the alert expressions and add no new
+        # cardinality (see scripts/ci/validate-recording-rule-cardinality.py --
+        # name/namespace/drive are already on its reviewed allowlist).
+                        - record: bsod:vmi_disk_write_latency:avg_1h
+                          expr: |
+                            (
+                              sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_write_times_seconds_total[1h]))
+                                /
+                              sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_write_total[1h]))
+                            )
+                            and
+                            sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_write_total[1h])) > 0
+
+                        - record: bsod:vmi_disk_write_latency:avg_24h
+                          expr: |
+                            (
+                              sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_write_times_seconds_total[24h]))
+                                /
+                              sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_write_total[24h]))
+                            )
+                            and
+                            sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_write_total[24h])) > 0
+
+        # WORST-DIRECTION latency (F-01). This is what the alerts consume, so
+        # the read/write union lives in exactly ONE place instead of being
+        # re-derived in each of the four storage alert expressions.
+        #
+        # WHY THIS SHAPE. PromQL's max() is an AGGREGATION operator, not a
+        # two-vector function -- `max(a, b)` is a parse error, and the naive
+        # binary form `(a >= b) or b` silently DROPS a series that exists on
+        # only one side (a VM doing reads but no writes, or the reverse, where
+        # the other direction's denominator guard correctly emitted nothing).
+        # That would reintroduce exactly the blindness F-01 is fixing.
+        #
+        # label_replace() stamps a distinguishing `direction` label on each
+        # side so `or` performs a genuine UNION rather than a left-preferring
+        # merge, then `max by (name, namespace, drive)` collapses the pair back
+        # to one series per disk -- dropping `direction` in the process, which
+        # is why the label costs no cardinality downstream. A disk present on
+        # only one side survives with that side's value.
+        #
+        # `$value` in the alert annotations is therefore the worst direction's
+        # latency, not the read value, which is what an operator needs to see.
+                        - record: bsod:vmi_disk_latency:worst_1h
+                          expr: |
+                            max by (name, namespace, drive) (
+                              label_replace(bsod:vmi_disk_latency:avg_1h, "direction", "read", "", "")
+                              or
+                              label_replace(bsod:vmi_disk_write_latency:avg_1h, "direction", "write", "", "")
+                            )
+
+                        - record: bsod:vmi_disk_latency:worst_24h
+                          expr: |
+                            max by (name, namespace, drive) (
+                              label_replace(bsod:vmi_disk_latency:avg_24h, "direction", "read", "", "")
+                              or
+                              label_replace(bsod:vmi_disk_write_latency:avg_24h, "direction", "write", "", "")
+                            )
+
+        # Per-VM BSOD risk factor count (pre-computed context for crash correlation).
+        # Continuously tracks how many known risk conditions are active per VM so
+        # that when a crash occurs, the pre-crash risk posture is already in TSDB.
+        # Requires: windows_exporter + bsod-textfile-collector.ps1 deployed in guest.
+        # Risk factors counted (0-3 range):
+        #   1. bsod_virtio_driver_outdated == 1 (driver below stream threshold)
+        #   2. min(bsod_io_timeout_value) <= 60 (IoTimeoutValue at or below danger zone)
+        #      THRESHOLD SOURCE: shared/io-timeout-thresholds.json
+        #      (risk_factor_at_or_below_seconds). PromQL cannot read JSON at
+        #      runtime, so this literal is bound to the shared config by
+        #      scripts/ci/validate-shared-thresholds.py -- editing one without
+        #      the other fails CI (M-7).
+        #   3. bsod_crashdump_enabled == 0 (no crash dump configured)
+        # All three metrics are always emitted together by the textfile collector;
+        # if one exists for a VM, all three exist. Returns no series for VMs
+        # without bsod-textfile-collector.ps1 deployed (harmless no-op).
+                        - record: bsod:vm_risk_factor_count:gauge
+                          expr: |
+                            (max by (vm_name) (bsod_virtio_driver_outdated))
+                            + on(vm_name)
+                            (min by (vm_name) (bsod_io_timeout_value) <= bool 60)
+                            + on(vm_name)
+                            (max by (vm_name) (bsod_crashdump_enabled == bool 0))
+
+        # Cluster CPU heterogeneity detection (R-9).
+        # Counts distinct CPU CAPABILITY GROUPS among KubeVirt-labelled nodes.
+        #
+        # WHY THIS CHANGED: the previous expression counted CPU *vendors* (AMD
+        # label present + Intel label present). That is blind to intra-vendor
+        # generation heterogeneity, which is the far more common real-world
+        # case. Verified on a live OCP 4.21.10 cluster with 3 AMD workers --
+        # EPYC-Rome + EPYC-Milan, carrying 2 genuinely different feature sets
+        # (delta included pcid, invpcid, erms, pku, amd-psfd):
+        #     vendor-count expression  -> 1  (no heterogeneity detected)
+        #     feature-signature count  -> 2  (matches ground truth)
+        # So BSODRisk_HeterogeneousCPUMigration could never fire there, despite
+        # a real Rome<->Milan live-migration risk (0x101 / 0x9C) that the Python
+        # analyzer's BSOD_CPU_CPU_MODEL_MIGRATION rule *did* detect. That is a
+        # coverage inversion: the customer-facing layer was blind to a risk the
+        # Red Hat-only layer caught.
+        #
+        # HOW IT WORKS: PromQL cannot enumerate label KEYS, so distinct CPU
+        # models cannot be counted directly from host-model-cpu.node.kubevirt.io/*
+        # (each model is its own label key). Instead we group by a small set of
+        # discriminating cpu-feature labels: nodes with identical values across
+        # all of them are one capability group. These particular features were
+        # chosen because they differ across recent Intel and AMD generations and
+        # are present on every KubeVirt-labelled node.
+        #
+        # Scoped to nodes carrying a KubeVirt cpu-vendor label so that
+        # non-virtualization nodes (masters, infra) cannot form a spurious
+        # "empty signature" group and inflate the count.
+        #
+        # STILL AN APPROXIMATION: two generations sharing all five sampled
+        # features group together. Full per-node feature-set comparison remains
+        # available offline via BSOD_CPU_CPU_MODEL_MIGRATION.
+        #
+        # PREREQUISITE: kube-state-metrics must expose KubeVirt node labels.
+        # On OCP 4.14+ with nodes=[*] allowlist (default) this works automatically;
+        # returns 0 otherwise, and the alert then cannot fire (see the
+        # alert-coverage gate for how that gap is surfaced).
+                        - record: bsod:cluster_cpu_model_count:gauge
+                          expr: |
+                            count(
+                              count by (
+                                label_cpu_feature_node_kubevirt_io_pcid,
+                                label_cpu_feature_node_kubevirt_io_invpcid,
+                                label_cpu_feature_node_kubevirt_io_pku,
+                                label_cpu_feature_node_kubevirt_io_erms,
+                                label_cpu_feature_node_kubevirt_io_amd_psfd
+                              ) (
+                                kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true"}
+                                or
+                                kube_node_labels{label_cpu_vendor_node_kubevirt_io_intel="true"}
+                              )
+                            ) or vector(0)
+
+        # Per-cluster BSOD risk summary (R-10 multi-cluster aggregation).
+        # Single low-cardinality series per cluster: sum of all active risk factors
+        # across all VMs with bsod-textfile-collector deployed. Suitable for
+        # forwarding to ACM Observability hub via custom metrics allowlist.
+        # Returns 0 when no VMs have the textfile collector deployed.
+                        - record: bsod:cluster_risk_summary:gauge
+                          expr: |
+                            sum(bsod:vm_risk_factor_count:gauge) or vector(0)
+
+        # Per-cluster driver compliance ratio (R-10).
+        # Fraction of VMs reporting a compliant (not outdated) virtio-win driver.
+        #   1.0    = every reporting VM is compliant
+        #   0.0    = every reporting VM is outdated
+        #   ABSENT = no VM is reporting -- nothing has been assessed
+        #
+        # R-39 (v0.19.0 follow-up N-03): the `or vector(1)` fallback that used to
+        # terminate this expression is REMOVED. It made the "absent" case
+        # unreachable and reported a fabricated **1.0 -- perfect compliance --
+        # precisely when zero VMs had the textfile collector deployed**, i.e. on
+        # every cluster where the guest-evidence path is not yet instrumented.
+        # A fleet dashboard would show 100% driver compliance for a fleet nobody
+        # had measured. Note the comment above already documented "absent = no
+        # data" while the expression guaranteed the opposite -- the intent was
+        # right and the fallback contradicted it.
+        #
+        # An empty vector is Prometheus's native way of saying "no data"; that is
+        # the correct answer here and consumers must render it as such (see
+        # dashboards/README.md, and the `noValue: "N/A"` field config already used
+        # on the Fleet Driver Compliance gauge).
+        #
+        # Deliberately NOT applied to bsod:cluster_risk_summary:gauge above: 0 is
+        # the semantically correct total for "no risk factors reported", and a sum
+        # of nothing genuinely is zero. Claiming 100% *compliance* on no evidence
+        # is a different and worse claim than reporting a zero *count*.
+        # Low-cardinality (single series per cluster); suitable for hub forwarding.
+                        - record: bsod:cluster_driver_compliance:ratio
+                          expr: |
+                            1 - (
+                              sum(bsod_virtio_driver_outdated == bool 1) /
+                              count(bsod_virtio_driver_outdated)
+                            )
+
+        # Fleet-wide evidence completeness (Issue K, R-27's first metric
+        # family -- see scripts/cnv-bsod-fleet-exporter.sh's module header).
+        # sum(assessed)/sum(total) over every VM currently reporting --
+        # checks-WEIGHTED, deliberately NOT a mean of per-VM percentages, and
+        # deliberately NOT pre-aggregated in the exporter itself (the exporter
+        # emits only the raw per-VM counters bsod_vm_checks_assessed/_total;
+        # this recording rule does the one and only aggregation). Naming and
+        # unit convention (0-1 ratio, not 0-100 percent) mirrors
+        # bsod:cluster_driver_compliance:ratio directly above.
+        #
+        # WHY WEIGHTED, NOT avg() (revised post-architectural-review,
+        # 2026-08-04): an earlier version of this rule used
+        # avg(bsod_evidence_completeness_percent) -- an unweighted mean of
+        # per-VM percentages. That disagrees with cnv-win-bsod-audit.sh
+        # --json's own summary.evidence_completeness_pct (checks-weighted)
+        # for the identical input whenever VMs have different check counts,
+        # and is the wrong statistic for a coverage SLO: two VMs at 100% and
+        # 0% completeness average to "50% fleet coverage" regardless of how
+        # many actual checks each contributes. sum()/sum() over raw counts
+        # gives the SAME weighted answer bash/Python already compute, by
+        # construction rather than by coincidence -- see
+        # shared/evidence-completeness-thresholds.json's _units field.
+        #
+        # No `> 0` guard needed: sum() over an empty vector naturally yields
+        # no series (not NaN/Inf), which is the correct "no VMs reporting
+        # yet" answer -- same absent-vs-zero reasoning as
+        # bsod:cluster_driver_compliance:ratio above. A 0/0 divide (NaN) is
+        # not reachable here either: cnv-win-bsod-audit.sh runs its full,
+        # fixed gate set unconditionally against every VM it audits, so
+        # bsod_vm_checks_total is always > 0 for any VM series that exists at
+        # all -- there is no code path that reports a VM with zero attempted
+        # checks.
+                        - record: bsod:fleet_evidence_completeness:ratio
+                          expr: |
+                            sum(bsod_vm_checks_assessed) / sum(bsod_vm_checks_total)
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: bsod-risk-grafana-dashboard
+          annotations:
+            policy.open-cluster-management.io/hub-templates: "raw"
+            policy.open-cluster-management.io/disable-templates: "true"
+        spec:
+          remediationAction: inform
+          severity: low
+          namespaceSelector:
+            include:
+              - openshift-cnv
+          object-templates:
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: bsod-risk-grafana-dashboard
+                  namespace: openshift-cnv
+                  labels:
+                    grafana-dashboard: "true"
+                    app.kubernetes.io/component: bsod-detection
+                data:
+                  bsod-risk-overview.json: |
+                    {
+                      "annotations": {
+                        "list": [
+                          {
+                            "builtIn": 1,
+                            "datasource": {
+                              "type": "grafana",
+                              "uid": "-- Grafana --"
+                            },
+                            "enable": true,
+                            "hide": true,
+                            "iconColor": "rgba(0, 211, 255, 1)",
+                            "name": "Annotations & Alerts",
+                            "type": "dashboard"
+                          }
+                        ]
+                      },
+                      "description": "BSOD risk posture for OpenShift Virtualization Windows VMs. Surfaces BSODRisk_* PrometheusRule alerts separated by scope (VM-level, node-level), fleet readiness, storage latency trends, and guest-side metrics (windows_exporter).",
+                      "editable": true,
+                      "fiscalYearStartMonth": 0,
+                      "graphTooltip": 1,
+                      "id": null,
+                      "links": [
+                        {
+                          "asDropdown": false,
+                          "icon": "external link",
+                          "includeVars": false,
+                          "keepTime": false,
+                          "tags": [],
+                          "targetBlank": true,
+                          "title": "KCS 7132512 - Storage Latency",
+                          "type": "link",
+                          "url": "https://access.redhat.com/solutions/7132512"
+                        },
+                        {
+                          "asDropdown": false,
+                          "icon": "external link",
+                          "includeVars": false,
+                          "keepTime": false,
+                          "tags": [],
+                          "targetBlank": true,
+                          "title": "KCS 7141291 - Guest Crash",
+                          "type": "link",
+                          "url": "https://access.redhat.com/solutions/7141291"
+                        },
+                        {
+                          "asDropdown": false,
+                          "icon": "external link",
+                          "includeVars": false,
+                          "keepTime": false,
+                          "tags": [],
+                          "targetBlank": true,
+                          "title": "KCS 7132511 - CPU/Migration",
+                          "type": "link",
+                          "url": "https://access.redhat.com/solutions/7132511"
+                        }
+                      ],
+                      "panels": [
+                        {
+                          "collapsed": false,
+                          "gridPos": {
+                            "h": 1,
+                            "w": 24,
+                            "x": 0,
+                            "y": 0
+                          },
+                          "id": 100,
+                          "title": "Alert Overview",
+                          "type": "row"
+                        },
+                        {
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "description": "Total count of all BSODRisk alerts currently firing across the cluster (includes VM-level, node-level, and cluster-scoped alerts).",
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "thresholds"
+                              },
+                              "mappings": [
+                                {
+                                  "options": {
+                                    "0": {
+                                      "color": "green",
+                                      "text": "Inactive"
+                                    }
+                                  },
+                                  "type": "value"
+                                },
+                                {
+                                  "options": {
+                                    "1": {
+                                      "color": "red",
+                                      "text": "Firing"
+                                    }
+                                  },
+                                  "type": "value"
+                                }
+                              ],
+                              "thresholds": {
+                                "mode": "absolute",
+                                "steps": [
+                                  {
+                                    "color": "green",
+                                    "value": null
+                                  },
+                                  {
+                                    "color": "red",
+                                    "value": 1
+                                  }
+                                ]
+                              },
+                              "noValue": "0"
+                            },
+                            "overrides": []
+                          },
+                          "gridPos": {
+                            "h": 6,
+                            "w": 12,
+                            "x": 0,
+                            "y": 1
+                          },
+                          "id": 1,
+                          "options": {
+                            "colorMode": "background",
+                            "graphMode": "none",
+                            "justifyMode": "center",
+                            "orientation": "horizontal",
+                            "reduceOptions": {
+                              "calcs": [
+                                "lastNotNull"
+                              ],
+                              "fields": "",
+                              "values": false
+                            },
+                            "textMode": "auto"
+                          },
+                          "targets": [
+                            {
+                              "expr": "count(ALERTS{alertname=~\"BSODRisk_.*\", alertstate=\"firing\"}) or vector(0)",
+                              "legendFormat": "{{ alertname }}",
+                              "refId": "A"
+                            }
+                          ],
+                          "title": "Total Firing Alerts",
+                          "type": "stat"
+                        },
+                        {
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "description": "Count of distinct BSODRisk alerts currently firing, by severity. Colors match standard severity semantics: blue=info, yellow=warning, red=critical.",
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "fixed",
+                                "fixedColor": "text"
+                              },
+                              "thresholds": {
+                                "mode": "absolute",
+                                "steps": [
+                                  {
+                                    "color": "green",
+                                    "value": null
+                                  }
+                                ]
+                              },
+                              "noValue": "0"
+                            },
+                            "overrides": [
+                              {
+                                "matcher": {
+                                  "id": "byName",
+                                  "options": "info"
+                                },
+                                "properties": [
+                                  {
+                                    "id": "color",
+                                    "value": {
+                                      "mode": "fixed",
+                                      "fixedColor": "blue"
+                                    }
+                                  }
+                                ]
+                              },
+                              {
+                                "matcher": {
+                                  "id": "byName",
+                                  "options": "warning"
+                                },
+                                "properties": [
+                                  {
+                                    "id": "color",
+                                    "value": {
+                                      "mode": "fixed",
+                                      "fixedColor": "orange"
+                                    }
+                                  }
+                                ]
+                              },
+                              {
+                                "matcher": {
+                                  "id": "byName",
+                                  "options": "critical"
+                                },
+                                "properties": [
+                                  {
+                                    "id": "color",
+                                    "value": {
+                                      "mode": "fixed",
+                                      "fixedColor": "red"
+                                    }
+                                  }
+                                ]
+                              }
+                            ]
+                          },
+                          "gridPos": {
+                            "h": 6,
+                            "w": 12,
+                            "x": 12,
+                            "y": 1
+                          },
+                          "id": 2,
+                          "options": {
+                            "colorMode": "background",
+                            "graphMode": "none",
+                            "justifyMode": "center",
+                            "orientation": "horizontal",
+                            "reduceOptions": {
+                              "calcs": [
+                                "lastNotNull"
+                              ],
+                              "fields": "",
+                              "values": false
+                            },
+                            "textMode": "auto"
+                          },
+                          "targets": [
+                            {
+                              "expr": "count(ALERTS{alertname=~\"BSODRisk_.*\", alertstate=\"firing\"}) by (severity) or vector(0)",
+                              "legendFormat": "{{ severity }}",
+                              "refId": "A"
+                            }
+                          ],
+                          "title": "Firing Alerts by Severity",
+                          "type": "stat"
+                        },
+                        {
+                          "collapsed": false,
+                          "gridPos": {
+                            "h": 1,
+                            "w": 24,
+                            "x": 0,
+                            "y": 7
+                          },
+                          "id": 101,
+                          "title": "Per-VM Risk",
+                          "type": "row"
+                        },
+                        {
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "description": "Number of active BSOD risk alerts per VM. Each cell shows one VM with at least one firing alert. Color intensity: yellow=1, orange=2, red=3+. Only VM-scoped alerts appear here; node-level alerts are shown separately below.",
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "thresholds"
+                              },
+                              "thresholds": {
+                                "mode": "absolute",
+                                "steps": [
+                                  {
+                                    "color": "green",
+                                    "value": null
+                                  },
+                                  {
+                                    "color": "yellow",
+                                    "value": 1
+                                  },
+                                  {
+                                    "color": "orange",
+                                    "value": 2
+                                  },
+                                  {
+                                    "color": "red",
+                                    "value": 3
+                                  }
+                                ]
+                              },
+                              "noValue": "0"
+                            },
+                            "overrides": []
+                          },
+                          "gridPos": {
+                            "h": 8,
+                            "w": 24,
+                            "x": 0,
+                            "y": 8
+                          },
+                          "id": 3,
+                          "options": {
+                            "colorMode": "background",
+                            "graphMode": "none",
+                            "justifyMode": "center",
+                            "orientation": "auto",
+                            "reduceOptions": {
+                              "calcs": [
+                                "lastNotNull"
+                              ],
+                              "fields": "",
+                              "values": false
+                            },
+                            "textMode": "auto"
+                          },
+                          "targets": [
+                            {
+                              "expr": "count by (name, namespace) (ALERTS{alertname=~\"BSODRisk_.*\", alertstate=\"firing\", name!=\"\"} or label_replace(ALERTS{alertname=~\"BSODRisk_.*\", alertstate=\"firing\", vm_name!=\"\"}, \"name\", \"$1\", \"vm_name\", \"(.*)\"))",
+                              "legendFormat": "{{ namespace }}/{{ name }}",
+                              "refId": "A"
+                            }
+                          ],
+                          "title": "Per-VM Active BSOD Alerts",
+                          "type": "stat"
+                        },
+                        {
+                          "collapsed": false,
+                          "gridPos": {
+                            "h": 1,
+                            "w": 24,
+                            "x": 0,
+                            "y": 16
+                          },
+                          "id": 106,
+                          "title": "Node & Cluster Alerts",
+                          "type": "row"
+                        },
+                        {
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "description": "Node-scoped BSODRisk alerts such as AMD microcode verification. These are NOT VM-specific -- they indicate risk conditions on the underlying compute node that can affect any VM scheduled there. Cluster-scoped alerts (e.g. recent migration detected) also appear here.",
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "thresholds"
+                              },
+                              "thresholds": {
+                                "mode": "absolute",
+                                "steps": [
+                                  {
+                                    "color": "green",
+                                    "value": null
+                                  },
+                                  {
+                                    "color": "yellow",
+                                    "value": 1
+                                  },
+                                  {
+                                    "color": "orange",
+                                    "value": 2
+                                  }
+                                ]
+                              },
+                              "noValue": "0"
+                            },
+                            "overrides": []
+                          },
+                          "gridPos": {
+                            "h": 8,
+                            "w": 12,
+                            "x": 0,
+                            "y": 17
+                          },
+                          "id": 11,
+                          "options": {
+                            "colorMode": "background",
+                            "graphMode": "none",
+                            "justifyMode": "center",
+                            "orientation": "horizontal",
+                            "reduceOptions": {
+                              "calcs": [
+                                "lastNotNull"
+                              ],
+                              "fields": "",
+                              "values": false
+                            },
+                            "textMode": "auto"
+                          },
+                          "targets": [
+                            {
+                              "expr": "count by (node) (ALERTS{alertname=~\"BSODRisk_.*\", alertstate=\"firing\", name=\"\"})",
+                              "legendFormat": "{{ node }}",
+                              "refId": "A"
+                            }
+                          ],
+                          "title": "Nodes with Active Risk Alerts",
+                          "type": "stat"
+                        },
+                        {
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "description": "All currently firing BSODRisk alerts with their scope (VM name or node), severity, and alert type. Use this table to identify exactly which alerts are active and where they originate. Namespace is blank for node/cluster-scoped alerts (e.g. BSODRisk_AMDNodeRequiresMicrocodeVerification) -- those do not relate to any VM's namespace; use the Node column for those rows instead.",
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "thresholds"
+                              },
+                              "custom": {
+                                "align": "auto",
+                                "displayMode": "auto"
+                              },
+                              "thresholds": {
+                                "mode": "absolute",
+                                "steps": [
+                                  {
+                                    "color": "green",
+                                    "value": null
+                                  },
+                                  {
+                                    "color": "red",
+                                    "value": 1
+                                  }
+                                ]
+                              }
+                            },
+                            "overrides": [
+                              {
+                                "matcher": {
+                                  "id": "byName",
+                                  "options": "Status"
+                                },
+                                "properties": [
+                                  {
+                                    "id": "custom.displayMode",
+                                    "value": "color-background-solid"
+                                  },
+                                  {
+                                    "id": "mappings",
+                                    "value": [
+                                      {
+                                        "type": "value",
+                                        "options": {
+                                          "preview": {
+                                            "text": "PREVIEW",
+                                            "color": "orange"
+                                          }
+                                        }
+                                      },
+                                      {
+                                        "type": "special",
+                                        "options": {
+                                          "match": "empty",
+                                          "result": {
+                                            "text": "",
+                                            "color": "transparent"
+                                          }
+                                        }
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          },
+                          "gridPos": {
+                            "h": 8,
+                            "w": 12,
+                            "x": 12,
+                            "y": 17
+                          },
+                          "id": 12,
+                          "options": {
+                            "footer": {
+                              "enablePagination": false,
+                              "show": false
+                            },
+                            "showHeader": true,
+                            "sortBy": [
+                              {
+                                "desc": true,
+                                "displayName": "Severity"
+                              }
+                            ]
+                          },
+                          "targets": [
+                            {
+                              "expr": "ALERTS{alertname=~\"BSODRisk_.*\", alertstate=\"firing\"}",
+                              "format": "table",
+                              "instant": true,
+                              "legendFormat": "",
+                              "refId": "A"
+                            }
+                          ],
+                          "transformations": [
+                            {
+                              "id": "filterFieldsByName",
+                              "options": {
+                                "include": {
+                                  "pattern": "^(alertname|severity|namespace|name|node|bsod_status|Time|Value)$"
+                                }
+                              }
+                            },
+                            {
+                              "id": "organize",
+                              "options": {
+                                "excludeByName": {
+                                  "Time": true,
+                                  "Value": true
+                                },
+                                "indexByName": {
+                                  "alertname": 0,
+                                  "severity": 1,
+                                  "namespace": 2,
+                                  "name": 3,
+                                  "node": 4,
+                                  "bsod_status": 5
+                                },
+                                "renameByName": {
+                                  "alertname": "Alert",
+                                  "severity": "Severity",
+                                  "namespace": "Namespace",
+                                  "name": "VM",
+                                  "node": "Node",
+                                  "bsod_status": "Status"
+                                }
+                              }
+                            }
+                          ],
+                          "title": "All Firing Alerts (Detail)",
+                          "type": "table"
+                        },
+                        {
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "description": "Shows the CPU vendor distribution across worker nodes. A cluster with both AMD and Intel nodes is heterogeneous -- live migrations on such clusters carry elevated BSOD risk (CLOCK_WATCHDOG_TIMEOUT, MACHINE_CHECK_EXCEPTION). Uses kube_node_labels with KubeVirt cpu-vendor labels, joined against kube_node_role{role=\"worker\"} to scope to worker nodes. Requires kube-state-metrics node label allowlist (default on OCP 4.14+). Confirmed live this panel always showed 0 for both series before this fix: filtering kube_node_labels itself on label_node_role_kubernetes_io_worker=\"true\" can never match on OpenShift, because node-role.kubernetes.io/* labels are presence-only and carry an empty string value (verified via `oc get node -o jsonpath`), and Prometheus's data model treats a label with an empty value as equivalent to that label being absent -- no allowlist setting fixes this, since the label is exposed correctly, just never with the value \"true\". kube_node_role is kube-state-metrics' purpose-built metric for node roles (it parses the presence-only label into a proper role= value) and is the only reliable way to scope by role.",
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "thresholds"
+                              },
+                              "thresholds": {
+                                "mode": "absolute",
+                                "steps": [
+                                  {
+                                    "color": "green",
+                                    "value": null
+                                  },
+                                  {
+                                    "color": "yellow",
+                                    "value": 1
+                                  }
+                                ]
+                              },
+                              "noValue": "No data (CPU-vendor labels not exposed)"
+                            },
+                            "overrides": []
+                          },
+                          "gridPos": {
+                            "h": 6,
+                            "w": 12,
+                            "x": 0,
+                            "y": 25
+                          },
+                          "id": 13,
+                          "options": {
+                            "colorMode": "background",
+                            "graphMode": "none",
+                            "justifyMode": "center",
+                            "orientation": "horizontal",
+                            "reduceOptions": {
+                              "calcs": [
+                                "lastNotNull"
+                              ],
+                              "fields": "",
+                              "values": false
+                            },
+                            "textMode": "auto"
+                          },
+                          "targets": [
+                            {
+                              "expr": "count(kube_node_labels{label_cpu_vendor_node_kubevirt_io_intel=\"true\"} and on(node) kube_node_role{role=\"worker\"}) or vector(0)",
+                              "legendFormat": "Intel Nodes",
+                              "refId": "A"
+                            },
+                            {
+                              "expr": "count(kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd=\"true\"} and on(node) kube_node_role{role=\"worker\"}) or vector(0)",
+                              "legendFormat": "AMD Nodes",
+                              "refId": "B"
+                            }
+                          ],
+                          "title": "Node CPU Vendor Distribution (R-9)",
+                          "type": "stat"
+                        },
+                        {
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "description": "Cluster CPU heterogeneity gauge from the bsod:cluster_cpu_model_count:gauge recording rule. Values: 0 = no vendor labels (allowlist not configured), 1 = homogeneous (all same vendor), 2 = heterogeneous (AMD + Intel nodes). A value of 2 means BSODRisk_HeterogeneousCPUMigration will fire on any VM live migration.",
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "thresholds"
+                              },
+                              "mappings": [
+                                {
+                                  "options": {
+                                    "0": {
+                                      "color": "text",
+                                      "text": "No Data"
+                                    },
+                                    "1": {
+                                      "color": "green",
+                                      "text": "Homogeneous"
+                                    },
+                                    "2": {
+                                      "color": "orange",
+                                      "text": "Heterogeneous"
+                                    }
+                                  },
+                                  "type": "value"
+                                }
+                              ],
+                              "thresholds": {
+                                "mode": "absolute",
+                                "steps": [
+                                  {
+                                    "color": "text",
+                                    "value": null
+                                  },
+                                  {
+                                    "color": "green",
+                                    "value": 1
+                                  },
+                                  {
+                                    "color": "orange",
+                                    "value": 2
+                                  }
+                                ]
+                              },
+                              "noValue": "Recording rule not evaluated"
+                            },
+                            "overrides": []
+                          },
+                          "gridPos": {
+                            "h": 6,
+                            "w": 12,
+                            "x": 12,
+                            "y": 25
+                          },
+                          "id": 14,
+                          "options": {
+                            "colorMode": "background",
+                            "graphMode": "none",
+                            "justifyMode": "center",
+                            "orientation": "horizontal",
+                            "reduceOptions": {
+                              "calcs": [
+                                "lastNotNull"
+                              ],
+                              "fields": "",
+                              "values": false
+                            },
+                            "textMode": "auto"
+                          },
+                          "targets": [
+                            {
+                              "expr": "bsod:cluster_cpu_model_count:gauge",
+                              "legendFormat": "CPU Vendor Groups",
+                              "refId": "A"
+                            }
+                          ],
+                          "title": "Cluster CPU Heterogeneity Status",
+                          "type": "stat"
+                        },
+                        {
+                          "collapsed": false,
+                          "gridPos": {
+                            "h": 1,
+                            "w": 24,
+                            "x": 0,
+                            "y": 31
+                          },
+                          "id": 102,
+                          "title": "Fleet Readiness",
+                          "type": "row"
+                        },
+                        {
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "description": "Count of VMs with at least one active BSODRisk alert, grouped by namespace. Only VM-scoped alerts are counted (node and cluster alerts excluded).",
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "thresholds"
+                              },
+                              "thresholds": {
+                                "mode": "absolute",
+                                "steps": [
+                                  {
+                                    "color": "green",
+                                    "value": null
+                                  },
+                                  {
+                                    "color": "yellow",
+                                    "value": 1
+                                  },
+                                  {
+                                    "color": "red",
+                                    "value": 3
+                                  }
+                                ]
+                              },
+                              "noValue": "0"
+                            },
+                            "overrides": []
+                          },
+                          "gridPos": {
+                            "h": 6,
+                            "w": 12,
+                            "x": 0,
+                            "y": 26
+                          },
+                          "id": 4,
+                          "options": {
+                            "colorMode": "background",
+                            "graphMode": "none",
+                            "justifyMode": "center",
+                            "orientation": "horizontal",
+                            "reduceOptions": {
+                              "calcs": [
+                                "lastNotNull"
+                              ],
+                              "fields": "",
+                              "values": false
+                            },
+                            "textMode": "auto"
+                          },
+                          "targets": [
+                            {
+                              "expr": "count by (namespace) (count by (name, namespace) (ALERTS{alertname=~\"BSODRisk_.*\", alertstate=\"firing\", name!=\"\"} or label_replace(ALERTS{alertname=~\"BSODRisk_.*\", alertstate=\"firing\", vm_name!=\"\"}, \"name\", \"$1\", \"vm_name\", \"(.*)\"))) or vector(0)",
+                              "legendFormat": "{{ namespace }}",
+                              "refId": "A"
+                            }
+                          ],
+                          "title": "VMs with Active Alerts by Namespace",
+                          "type": "stat"
+                        },
+                        {
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "description": "Total running VMs tracked by KubeVirt versus those with at least one active VM-level BSOD risk alert. Note: 'Total Running VMs' includes ALL running VMIs (the KubeVirt os label is not reliably set, so Windows-only filtering is not applied here).",
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "palette-classic"
+                              }
+                            },
+                            "overrides": []
+                          },
+                          "gridPos": {
+                            "h": 6,
+                            "w": 12,
+                            "x": 12,
+                            "y": 26
+                          },
+                          "id": 5,
+                          "options": {
+                            "colorMode": "value",
+                            "graphMode": "none",
+                            "justifyMode": "center",
+                            "orientation": "horizontal",
+                            "reduceOptions": {
+                              "calcs": [
+                                "lastNotNull"
+                              ],
+                              "fields": "",
+                              "values": false
+                            },
+                            "textMode": "auto"
+                          },
+                          "targets": [
+                            {
+                              "expr": "count(kubevirt_vmi_info)",
+                              "legendFormat": "Total Running VMs",
+                              "refId": "A"
+                            },
+                            {
+                              "expr": "count(count by (name, namespace) (ALERTS{alertname=~\"BSODRisk_.*\", alertstate=\"firing\", name!=\"\"} or label_replace(ALERTS{alertname=~\"BSODRisk_.*\", alertstate=\"firing\", vm_name!=\"\"}, \"name\", \"$1\", \"vm_name\", \"(.*)\"))) or vector(0)",
+                              "legendFormat": "VMs at Risk",
+                              "refId": "B"
+                            }
+                          ],
+                          "title": "Fleet Summary",
+                          "type": "stat"
+                        },
+                        {
+                          "collapsed": false,
+                          "gridPos": {
+                            "h": 1,
+                            "w": 24,
+                            "x": 0,
+                            "y": 32
+                          },
+                          "id": 103,
+                          "title": "Storage Latency",
+                          "type": "row"
+                        },
+                        {
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "description": "Average disk read latency per VM over time. Amber marks the 0.5s sustained WARN threshold and red the 1.0s CRITICAL threshold used by BSODRisk_StorageLatencyElevated / BSODRisk_StorageLatencyHigh. These are deliberately far below the 60s VirtIO IoTimeoutValue: what causes MEMORY_MANAGEMENT (0x1A) is a TAIL spike during a storage brownout, so an hourly mean anywhere near 60s means the guest has already bugchecked. Sourced from shared/storage-latency-thresholds.json (KCS-7132512).",
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "palette-classic"
+                              },
+                              "custom": {
+                                "axisCenteredZero": false,
+                                "axisLabel": "Latency (seconds)",
+                                "drawStyle": "line",
+                                "fillOpacity": 10,
+                                "gradientMode": "none",
+                                "lineInterpolation": "smooth",
+                                "lineWidth": 2,
+                                "pointSize": 5,
+                                "showPoints": "auto",
+                                "spanNulls": false,
+                                "thresholdsStyle": {
+                                  "mode": "dashed"
+                                }
+                              },
+                              "thresholds": {
+                                "mode": "absolute",
+                                "steps": [
+                                  {
+                                    "color": "green",
+                                    "value": null
+                                  },
+                                  {
+                                    "color": "orange",
+                                    "value": 0.5
+                                  },
+                                  {
+                                    "color": "red",
+                                    "value": 1.0
+                                  }
+                                ]
+                              },
+                              "unit": "s"
+                            },
+                            "overrides": []
+                          },
+                          "gridPos": {
+                            "h": 8,
+                            "w": 24,
+                            "x": 0,
+                            "y": 33
+                          },
+                          "id": 6,
+                          "options": {
+                            "legend": {
+                              "calcs": [
+                                "mean",
+                                "max",
+                                "lastNotNull"
+                              ],
+                              "displayMode": "table",
+                              "placement": "bottom"
+                            },
+                            "tooltip": {
+                              "mode": "multi",
+                              "sort": "desc"
+                            }
+                          },
+                          "targets": [
+                            {
+                              "expr": "sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_read_times_seconds_total{name=~\"$vm\"}[5m])) / sum by (name, namespace, drive) (rate(kubevirt_vmi_storage_iops_read_total{name=~\"$vm\"}[5m])) > 0",
+                              "legendFormat": "{{ namespace }}/{{ name }}/{{ drive }}",
+                              "refId": "A"
+                            }
+                          ],
+                          "title": "VM Disk Read Latency (avg per I/O)",
+                          "type": "timeseries"
+                        },
+                        {
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "description": "Mirrors BSODRisk_StorageLatencyTrending. Worst-direction series (max of read and write) so the panel matches the alert exactly.",
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "palette-classic"
+                              },
+                              "custom": {
+                                "axisCenteredZero": false,
+                                "axisLabel": "Ratio (1h/24h)",
+                                "drawStyle": "line",
+                                "fillOpacity": 10,
+                                "gradientMode": "none",
+                                "lineInterpolation": "smooth",
+                                "lineWidth": 2,
+                                "pointSize": 5,
+                                "showPoints": "auto",
+                                "spanNulls": false,
+                                "thresholdsStyle": {
+                                  "mode": "dashed"
+                                }
+                              },
+                              "thresholds": {
+                                "mode": "absolute",
+                                "steps": [
+                                  {
+                                    "color": "green",
+                                    "value": null
+                                  },
+                                  {
+                                    "color": "red",
+                                    "value": 1.5
+                                  }
+                                ]
+                              },
+                              "noValue": "Awaiting 24h baseline"
+                            },
+                            "overrides": []
+                          },
+                          "gridPos": {
+                            "h": 8,
+                            "w": 24,
+                            "x": 0,
+                            "y": 41
+                          },
+                          "id": 9,
+                          "options": {
+                            "legend": {
+                              "calcs": [
+                                "mean",
+                                "max",
+                                "lastNotNull"
+                              ],
+                              "displayMode": "table",
+                              "placement": "bottom"
+                            },
+                            "tooltip": {
+                              "mode": "multi",
+                              "sort": "desc"
+                            }
+                          },
+                          "targets": [
+                            {
+                              "expr": "bsod:vmi_disk_latency:worst_1h{name=~\"$vm\"} / bsod:vmi_disk_latency:worst_24h{name=~\"$vm\"} > 0",
+                              "legendFormat": "{{ namespace }}/{{ name }}",
+                              "refId": "A"
+                            }
+                          ],
+                          "title": "Storage Latency Trend (1h / 24h ratio, worst direction)",
+                          "type": "timeseries"
+                        },
+                        {
+                          "collapsed": false,
+                          "gridPos": {
+                            "h": 1,
+                            "w": 24,
+                            "x": 0,
+                            "y": 49
+                          },
+                          "id": 104,
+                          "title": "Memory Pressure",
+                          "type": "row"
+                        },
+                        {
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "description": "Shows QEMU process RSS vs allocated domain memory. Without QGA/balloon driver, this will show ~100% (all memory pinned). With QGA, this accurately reflects guest utilization.",
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "palette-classic"
+                              },
+                              "custom": {
+                                "axisCenteredZero": false,
+                                "axisLabel": "Utilization",
+                                "drawStyle": "line",
+                                "fillOpacity": 10,
+                                "gradientMode": "none",
+                                "lineInterpolation": "smooth",
+                                "lineWidth": 2,
+                                "pointSize": 5,
+                                "showPoints": "auto",
+                                "spanNulls": false,
+                                "thresholdsStyle": {
+                                  "mode": "dashed"
+                                }
+                              },
+                              "max": 1,
+                              "min": 0,
+                              "thresholds": {
+                                "mode": "absolute",
+                                "steps": [
+                                  {
+                                    "color": "green",
+                                    "value": null
+                                  },
+                                  {
+                                    "color": "yellow",
+                                    "value": 0.85
+                                  }
+                                ]
+                              },
+                              "unit": "percentunit"
+                            },
+                            "overrides": []
+                          },
+                          "gridPos": {
+                            "h": 8,
+                            "w": 24,
+                            "x": 0,
+                            "y": 50
+                          },
+                          "id": 7,
+                          "options": {
+                            "legend": {
+                              "calcs": [
+                                "mean",
+                                "max",
+                                "lastNotNull"
+                              ],
+                              "displayMode": "table",
+                              "placement": "bottom"
+                            },
+                            "tooltip": {
+                              "mode": "multi",
+                              "sort": "desc"
+                            }
+                          },
+                          "targets": [
+                            {
+                              "expr": "kubevirt_vmi_memory_used_bytes{name=~\"$vm\"} / on(name, namespace) kubevirt_vmi_memory_domain_bytes{name=~\"$vm\"}",
+                              "legendFormat": "{{namespace}}/{{name}}",
+                              "refId": "A"
+                            }
+                          ],
+                          "title": "Windows VM Memory Utilization (Guest / Domain)",
+                          "type": "timeseries"
+                        },
+                        {
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "description": "Windows pagefile utilization per VM (requires windows_exporter with pagefile collector). Values above 90% (yellow threshold) amplify BSOD risk when combined with slow storage.",
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "palette-classic"
+                              },
+                              "custom": {
+                                "axisCenteredZero": false,
+                                "axisLabel": "Utilization",
+                                "drawStyle": "line",
+                                "fillOpacity": 10,
+                                "gradientMode": "none",
+                                "lineInterpolation": "smooth",
+                                "lineWidth": 2,
+                                "pointSize": 5,
+                                "showPoints": "auto",
+                                "spanNulls": false,
+                                "thresholdsStyle": {
+                                  "mode": "dashed"
+                                }
+                              },
+                              "max": 1,
+                              "min": 0,
+                              "thresholds": {
+                                "mode": "absolute",
+                                "steps": [
+                                  {
+                                    "color": "green",
+                                    "value": null
+                                  },
+                                  {
+                                    "color": "yellow",
+                                    "value": 0.9
+                                  }
+                                ]
+                              },
+                              "unit": "percentunit"
+                            },
+                            "overrides": []
+                          },
+                          "gridPos": {
+                            "h": 8,
+                            "w": 24,
+                            "x": 0,
+                            "y": 58
+                          },
+                          "id": 10,
+                          "options": {
+                            "legend": {
+                              "calcs": [
+                                "mean",
+                                "max",
+                                "lastNotNull"
+                              ],
+                              "displayMode": "table",
+                              "placement": "bottom"
+                            },
+                            "tooltip": {
+                              "mode": "multi",
+                              "sort": "desc"
+                            }
+                          },
+                          "targets": [
+                            {
+                              "expr": "(windows_pagefile_limit_bytes - windows_pagefile_free_bytes) / windows_pagefile_limit_bytes",
+                              "legendFormat": "{{vm_name}} ({{file}})",
+                              "refId": "A"
+                            }
+                          ],
+                          "title": "Pagefile Pressure (windows_exporter)",
+                          "type": "timeseries"
+                        },
+                        {
+                          "collapsed": false,
+                          "gridPos": {
+                            "h": 1,
+                            "w": 24,
+                            "x": 0,
+                            "y": 66
+                          },
+                          "id": 105,
+                          "title": "Driver Version Distribution (windows_exporter)",
+                          "type": "row"
+                        },
+                        {
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "description": "Distribution of virtio-win driver versions across the Windows VM fleet. Requires windows_exporter with bsod-textfile-collector.ps1 deployed in guest VMs. See windows-exporter/README.md for setup.",
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "palette-classic"
+                              },
+                              "custom": {
+                                "align": "auto",
+                                "displayMode": "auto"
+                              }
+                            },
+                            "overrides": []
+                          },
+                          "gridPos": {
+                            "h": 6,
+                            "w": 24,
+                            "x": 0,
+                            "y": 67
+                          },
+                          "id": 8,
+                          "options": {
+                            "footer": {
+                              "enablePagination": false,
+                              "show": false
+                            },
+                            "showHeader": true,
+                            "sortBy": [
+                              {
+                                "desc": true,
+                                "displayName": "Count"
+                              }
+                            ]
+                          },
+                          "targets": [
+                            {
+                              "expr": "bsod_virtio_driver_version == 1",
+                              "format": "table",
+                              "instant": true,
+                              "legendFormat": "",
+                              "refId": "A"
+                            }
+                          ],
+                          "transformations": [
+                            {
+                              "id": "organize",
+                              "options": {
+                                "excludeByName": {
+                                  "Time": true,
+                                  "Value": true,
+                                  "__name__": true,
+                                  "container": true,
+                                  "endpoint": true,
+                                  "instance": true,
+                                  "job": true,
+                                  "pod": true,
+                                  "prometheus": true,
+                                  "service": true
+                                },
+                                "indexByName": {
+                                  "vm_name": 0,
+                                  "vm_namespace": 1,
+                                  "version": 2
+                                },
+                                "renameByName": {
+                                  "vm_name": "VM",
+                                  "vm_namespace": "Namespace",
+                                  "version": "VirtIO Driver Version"
+                                }
+                              }
+                            }
+                          ],
+                          "title": "VirtIO Driver Versions by VM (windows_exporter)",
+                          "type": "table"
+                        },
+                        {
+                          "collapsed": false,
+                          "gridPos": {
+                            "h": 1,
+                            "w": 24,
+                            "x": 0,
+                            "y": 73
+                          },
+                          "id": 108,
+                          "title": "Guest CPU & Memory Saturation (windows_exporter)",
+                          "type": "row"
+                        },
+                        {
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "description": "Guest-observed CPU utilization (100% minus the idle-mode share of windows_cpu_time_total). Requires windows_exporter with the cpu collector (enabled by default and by install-windows-exporter.ps1). R-46: this collector was always enabled but never consumed by any downstream panel/alert before this.",
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "palette-classic"
+                              },
+                              "custom": {
+                                "axisCenteredZero": false,
+                                "axisLabel": "Utilization",
+                                "drawStyle": "line",
+                                "fillOpacity": 10,
+                                "gradientMode": "none",
+                                "lineInterpolation": "smooth",
+                                "lineWidth": 2,
+                                "pointSize": 5,
+                                "showPoints": "auto",
+                                "spanNulls": false,
+                                "thresholdsStyle": {
+                                  "mode": "dashed"
+                                }
+                              },
+                              "max": 100,
+                              "min": 0,
+                              "thresholds": {
+                                "mode": "absolute",
+                                "steps": [
+                                  {
+                                    "color": "green",
+                                    "value": null
+                                  },
+                                  {
+                                    "color": "yellow",
+                                    "value": 90
+                                  }
+                                ]
+                              },
+                              "unit": "percent"
+                            },
+                            "overrides": []
+                          },
+                          "gridPos": {
+                            "h": 8,
+                            "w": 12,
+                            "x": 0,
+                            "y": 74
+                          },
+                          "id": 17,
+                          "options": {
+                            "legend": {
+                              "calcs": [
+                                "mean",
+                                "max",
+                                "lastNotNull"
+                              ],
+                              "displayMode": "table",
+                              "placement": "bottom"
+                            },
+                            "tooltip": {
+                              "mode": "multi",
+                              "sort": "desc"
+                            }
+                          },
+                          "targets": [
+                            {
+                              "expr": "100 - (100 * avg by (vm_name, vm_namespace) (rate(windows_cpu_time_total{mode=\"idle\"}[5m])))",
+                              "legendFormat": "{{vm_namespace}}/{{vm_name}}",
+                              "refId": "A"
+                            }
+                          ],
+                          "title": "Guest CPU Utilization (windows_exporter)",
+                          "type": "timeseries"
+                        },
+                        {
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "description": "Guest-observed physical memory utilization (100% minus free/total, from windows_exporter's memory collector). Distinct from the 'Windows VM Memory Utilization (Guest / Domain)' panel above, which is the hypervisor's ballooned-domain view. Requires windows_exporter with the memory collector (enabled by default and by install-windows-exporter.ps1). R-46: this collector was always enabled but never consumed by any downstream panel/alert before this.",
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "palette-classic"
+                              },
+                              "custom": {
+                                "axisCenteredZero": false,
+                                "axisLabel": "Utilization",
+                                "drawStyle": "line",
+                                "fillOpacity": 10,
+                                "gradientMode": "none",
+                                "lineInterpolation": "smooth",
+                                "lineWidth": 2,
+                                "pointSize": 5,
+                                "showPoints": "auto",
+                                "spanNulls": false,
+                                "thresholdsStyle": {
+                                  "mode": "dashed"
+                                }
+                              },
+                              "max": 100,
+                              "min": 0,
+                              "thresholds": {
+                                "mode": "absolute",
+                                "steps": [
+                                  {
+                                    "color": "green",
+                                    "value": null
+                                  },
+                                  {
+                                    "color": "yellow",
+                                    "value": 90
+                                  }
+                                ]
+                              },
+                              "unit": "percent"
+                            },
+                            "overrides": []
+                          },
+                          "gridPos": {
+                            "h": 8,
+                            "w": 12,
+                            "x": 12,
+                            "y": 74
+                          },
+                          "id": 18,
+                          "options": {
+                            "legend": {
+                              "calcs": [
+                                "mean",
+                                "max",
+                                "lastNotNull"
+                              ],
+                              "displayMode": "table",
+                              "placement": "bottom"
+                            },
+                            "tooltip": {
+                              "mode": "multi",
+                              "sort": "desc"
+                            }
+                          },
+                          "targets": [
+                            {
+                              "expr": "100 - (100 * windows_memory_physical_free_bytes / windows_memory_physical_total_bytes)",
+                              "legendFormat": "{{vm_namespace}}/{{vm_name}}",
+                              "refId": "A"
+                            }
+                          ],
+                          "title": "Guest Physical Memory Utilization (windows_exporter)",
+                          "type": "timeseries"
+                        },
+                        {
+                          "type": "row",
+                          "title": "Crash Detection & Risk Context",
+                          "collapsed": false,
+                          "gridPos": {
+                            "h": 1,
+                            "w": 24,
+                            "x": 0,
+                            "y": 82
+                          },
+                          "id": 107,
+                          "panels": []
+                        },
+                        {
+                          "type": "timeseries",
+                          "title": "Per-VM Risk Factor Count",
+                          "description": "Pre-computed BSOD risk factor count per VM (0-3). Tracks driver outdated, low IoTimeout, and crash dump disabled conditions. Higher values correlate with increased BSOD probability.",
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "gridPos": {
+                            "h": 8,
+                            "w": 12,
+                            "x": 0,
+                            "y": 83
+                          },
+                          "id": 15,
+                          "targets": [
+                            {
+                              "expr": "bsod:vm_risk_factor_count:gauge{vm_name=~\"$vm\"}",
+                              "legendFormat": "{{vm_name}}",
+                              "refId": "A"
+                            }
+                          ],
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "palette-classic"
+                              },
+                              "custom": {
+                                "lineWidth": 2,
+                                "fillOpacity": 20,
+                                "spanNulls": true,
+                                "axisSoftMin": 0,
+                                "axisSoftMax": 3
+                              },
+                              "thresholds": {
+                                "mode": "absolute",
+                                "steps": [
+                                  {
+                                    "color": "green",
+                                    "value": null
+                                  },
+                                  {
+                                    "color": "yellow",
+                                    "value": 1
+                                  },
+                                  {
+                                    "color": "orange",
+                                    "value": 2
+                                  },
+                                  {
+                                    "color": "red",
+                                    "value": 3
+                                  }
+                                ]
+                              },
+                              "unit": "short"
+                            },
+                            "overrides": []
+                          },
+                          "options": {
+                            "legend": {
+                              "calcs": [
+                                "last"
+                              ],
+                              "displayMode": "table",
+                              "placement": "right"
+                            },
+                            "tooltip": {
+                              "mode": "multi"
+                            }
+                          }
+                        },
+                        {
+                          "type": "timeseries",
+                          "title": "Crash Events (Proxy: Exporter Down)",
+                          "description": "Shows windows_exporter target availability. A drop to 0 while the VMI exists indicates a potential guest crash (BSOD, unexpected reboot). Corresponds to BSODRisk_GuestUnexpectedRestart alert.",
+                          "datasource": {
+                            "type": "prometheus",
+                            "uid": "${datasource}"
+                          },
+                          "gridPos": {
+                            "h": 8,
+                            "w": 12,
+                            "x": 12,
+                            "y": 83
+                          },
+                          "id": 16,
+                          "targets": [
+                            {
+                              "expr": "label_replace(up{job=~\"bsod-windows-exporter.*\", vm_name=~\"$vm\"}, \"name\", \"$1\", \"vm_name\", \"(.*)\")",
+                              "legendFormat": "{{vm_name}} (up)",
+                              "refId": "A"
+                            },
+                            {
+                              "expr": "ALERTS{alertname=\"BSODRisk_GuestUnexpectedRestart\", vm_name=~\"$vm\"}",
+                              "legendFormat": "{{vm_name}} ALERT",
+                              "refId": "B"
+                            }
+                          ],
+                          "fieldConfig": {
+                            "defaults": {
+                              "color": {
+                                "mode": "palette-classic"
+                              },
+                              "custom": {
+                                "lineWidth": 2,
+                                "fillOpacity": 10,
+                                "spanNulls": false
+                              },
+                              "thresholds": {
+                                "mode": "absolute",
+                                "steps": [
+                                  {
+                                    "color": "red",
+                                    "value": null
+                                  },
+                                  {
+                                    "color": "green",
+                                    "value": 1
+                                  }
+                                ]
+                              },
+                              "mappings": [
+                                {
+                                  "type": "value",
+                                  "options": {
+                                    "0": {
+                                      "text": "DOWN",
+                                      "color": "red"
+                                    }
+                                  }
+                                },
+                                {
+                                  "type": "value",
+                                  "options": {
+                                    "1": {
+                                      "text": "UP",
+                                      "color": "green"
+                                    }
+                                  }
+                                }
+                              ],
+                              "unit": "short"
+                            },
+                            "overrides": []
+                          },
+                          "options": {
+                            "legend": {
+                              "calcs": [
+                                "last"
+                              ],
+                              "displayMode": "table",
+                              "placement": "right"
+                            },
+                            "tooltip": {
+                              "mode": "multi"
+                            }
+                          }
+                        }
+                      ],
+                      "schemaVersion": 39,
+                      "tags": [
+                        "bsod",
+                        "openshift-virtualization",
+                        "cnv"
+                      ],
+                      "templating": {
+                        "list": [
+                          {
+                            "current": {
+                              "selected": false,
+                              "text": "default",
+                              "value": "default"
+                            },
+                            "hide": 0,
+                            "includeAll": false,
+                            "label": "Data Source",
+                            "multi": false,
+                            "name": "datasource",
+                            "options": [],
+                            "query": "prometheus",
+                            "queryValue": "",
+                            "refresh": 1,
+                            "regex": "",
+                            "type": "datasource"
+                          },
+                          {
+                            "current": {
+                              "selected": true,
+                              "text": "All",
+                              "value": "$__all"
+                            },
+                            "datasource": {
+                              "type": "prometheus",
+                              "uid": "${datasource}"
+                            },
+                            "definition": "label_values(kubevirt_vmi_info, name)",
+                            "hide": 0,
+                            "includeAll": true,
+                            "label": "VM",
+                            "multi": true,
+                            "name": "vm",
+                            "options": [],
+                            "query": "label_values(kubevirt_vmi_info, name)",
+                            "refresh": 2,
+                            "regex": "",
+                            "sort": 1,
+                            "type": "query"
+                          }
+                        ]
+                      },
+                      "time": {
+                        "from": "now-6h",
+                        "to": "now"
+                      },
+                      "timepicker": {},
+                      "timezone": "",
+                      "title": "BSOD Risk Overview",
+                      "uid": "bsod-risk-overview",
+                      "version": 1
+                    }
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: bsod-risk-guest-alerts
+          annotations:
+            policy.open-cluster-management.io/hub-templates: raw
+            policy.open-cluster-management.io/disable-templates: 'true'
+        spec:
+          remediationAction: inform
+          severity: medium
+          namespaceSelector:
+            include:
+              - openshift-cnv
+          object-templates:
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: monitoring.coreos.com/v1
+                kind: PrometheusRule
+                metadata:
+                  name: bsod-risk-guest-alerts
+                  namespace: openshift-cnv
+                  labels:
+                    prometheus: k8s
+                    role: alert-rules
+                    app.kubernetes.io/component: bsod-detection
+                spec:
+                  groups:
+                    - name: bsod-risk-guest.rules
+                      rules:
+
+        # Alert: Guest-visible disk latency from windows_exporter
+        # Requires: windows_exporter with logical_disk collector enabled
+        # Latency derived from rate counters (no raw avg metric exists)
+        # KCS: 7132512
+        # [KCS-VALIDATED]
+        # THRESHOLD SOURCE: shared/storage-latency-thresholds.json
+        # (sustained_critical_seconds), bound by
+        # scripts/ci/validate-shared-thresholds.py. H-5: this fired at 30 s/op
+        # over a 5m window, far beyond the point a guest stays usable. It is a
+        # 5m window (not 1h like the hypervisor rules), so it is already closer
+        # to burst behaviour -- 1 s/op sustained for 10m is a real signal.
+                        - alert: BSODRisk_GuestDiskLatencyHigh
+                          annotations:
+                            summary: "Windows VM guest-visible disk latency severely degraded"
+                            description: |
+                              Windows VM {{ $labels.vm_name }} reports guest-visible average disk read
+                              latency of {{ $value | humanize }}s via windows_exporter, at or above the
+                              1.0s severe-degradation threshold. This is measured INSIDE the guest and
+                              directly reflects what the VirtIO driver experiences -- individual I/Os in
+                              this regime approach the 60s IoTimeoutValue that triggers BSODs.
+                            runbook_url: "https://access.redhat.com/solutions/7132512"
+                            contact_first: "Red Hat (if recent platform change) / Microsoft (if no changes)"
+                            stop_codes: "0x1A, 0x7A, 0x50"
+                          expr: |
+                            (
+                              rate(windows_logical_disk_read_seconds_total{volume!~"HarddiskVolume.*"}[5m])
+                              / on(instance, vm_name, volume)
+                              rate(windows_logical_disk_reads_total{volume!~"HarddiskVolume.*"}[5m])
+                            ) >= 1
+                          for: 10m
+                          labels:
+                            severity: critical
+                            bsod_domain: storage
+                            kcs: "7132512"
+
+        # Alert: QEMU Guest Agent service down inside Windows VM
+        # Requires: windows_exporter with service collector or bsod textfile collector
+                        - alert: BSODRisk_QGAServiceDown
+                          annotations:
+                            summary: "QEMU Guest Agent not running in Windows VM"
+                            description: |
+                              Windows VM {{ $labels.vm_name }} reports QEMU Guest Agent (QEMU-GA) is not
+                              running. Without QGA, graceful shutdown on node drain will fail, VSS
+                              snapshots are unavailable, and the VM may experience dirty shutdowns that
+                              present as BSODs. Remediate: start the QEMU-GA service and set to Automatic.
+                            runbook_url: "https://access.redhat.com/solutions/7128506"
+                            contact_first: "Red Hat"
+                          expr: |
+                            bsod_qga_service_running == 0
+                          for: 15m
+                          labels:
+                            severity: warning
+                            bsod_domain: config
+                            kcs: "7128506"
+
+        # Alert: Pagefile pressure from windows_exporter
+        # Requires: windows_exporter with pagefile collector enabled
+        # NOTE: the pagefile collector only exposes free_bytes / limit_bytes gauges --
+        # there is no pagefile "usage_bytes" series (verified against upstream
+        # docs/collector.pagefile.md; see also scripts/ci/validate-metric-names.py).
+        # Utilization must be derived as (limit-free)/limit, matching
+        # dashboards/bsod-risk-overview.json's panel query.
+                        - alert: BSODRisk_PagefilePressure
+                          annotations:
+                            summary: "Windows VM pagefile free space critically low"
+                            description: |
+                              Windows VM {{ $labels.vm_name }} has pagefile utilization above 90%.
+                              Under memory pressure with slow storage, this amplifies the risk of
+                              MEMORY_MANAGEMENT (0x1A) BSODs when the system cannot page out fast enough.
+                            runbook_url: "https://access.redhat.com/solutions/7132512"
+                            contact_first: "Microsoft (if no recent platform changes)"
+                            stop_codes: "0x1A"
+                          expr: |
+                            ((windows_pagefile_limit_bytes - windows_pagefile_free_bytes) / windows_pagefile_limit_bytes) > 0.9
+                          for: 15m
+                          labels:
+                            severity: warning
+                            bsod_domain: resource
+                            kcs: "7132512"
+
+        # Alert: VirtIO driver version outdated (from custom textfile collector)
+        # Requires: bsod-textfile-collector.ps1 running in guest with thresholds JSON
+        # and OCP version (ocp-version.txt / -OCPVersion / BSOD_OCP_VERSION).
+        # Preferred: stream-aware gauge bsod_virtio_driver_outdated (computed in guest
+        # from shared/virtio-win-thresholds.json). Fallback: tooling floor 1.9.41 when
+        # the outdated gauge is absent (older collectors).
+                        - alert: BSODRisk_DriverVersionOutdated
+                          annotations:
+                            summary: "Windows VM has outdated VirtIO driver version"
+                            description: |
+                              Windows VM {{ $labels.vm_name }} reports VirtIO package version
+                              {{ $labels.version }} as outdated for the cluster OCP stream.
+                              Upgrade virtio-win per shared/virtio-win-thresholds.json (target often 1.9.57).
+                              Confirm with Gate 15 after guest collection if needed.
+                            runbook_url: "https://access.redhat.com/solutions/7141291"
+                            contact_first: "Red Hat"
+                          expr: |
+                            bsod_virtio_driver_outdated == 1
+                            or
+                            (
+                              (
+                                bsod_virtio_package_version == 1
+                                unless on(vm_name) bsod_virtio_driver_outdated
+                              )
+                              unless
+                              bsod_virtio_package_version{version=~"1\\.9\\.(4[1-9]|[5-9][0-9])|[2-9]\\..*"}
+                            )
+                          for: 0m
+                          labels:
+                            severity: warning
+                            bsod_domain: driver
+                            kcs: "7141291"
+
+        # Alert: VM served only by the legacy (non-stream-aware) driver fallback
+        # [GENERAL-KNOWLEDGE] Architect assessment Known Limitation #2 /
+        # peer-review item 10: BSODRisk_DriverVersionOutdated's fallback path
+        # (bsod_virtio_package_version regex floor, ~1.9.41) cannot distinguish
+        # el8_6 (target 1.9.24) from el9_6 (FAIL < 1.9.53) -- it is a universal
+        # floor, not a stream-aware verdict. This is not itself a BSOD risk
+        # signal; it flags collector *coverage* so operators know which VMs'
+        # driver verdicts are running on the older, less precise check and
+        # should be upgraded to bsod-textfile-collector.ps1 (which emits the
+        # stream-aware bsod_virtio_driver_outdated gauge) rather than trusting
+        # the fallback's verdict as-is.
+                        - alert: BSODRisk_LegacyDriverCollectorFallback
+                          annotations:
+                            summary: "Windows VM's driver verdict is served by the legacy, non-stream-aware fallback"
+                            description: |
+                              Windows VM {{ $labels.vm_name }} reports bsod_virtio_package_version but not
+                              bsod_virtio_driver_outdated, meaning BSODRisk_DriverVersionOutdated (if firing
+                              or not) is using the legacy universal-floor fallback (~1.9.41) rather than the
+                              stream-aware verdict. The fallback cannot distinguish RHEL streams (e.g. el8_6's
+                              1.9.24 target vs. el9_6's 1.9.53 FAIL threshold) and may under- or over-report.
+                              Upgrade this VM's guest collector to the current bsod-textfile-collector.ps1 to
+                              get the stream-aware gauge, or confirm the driver stream verdict via Gate 15
+                              after guest collection.
+                            runbook_url: "https://access.redhat.com/solutions/7141291"
+                            contact_first: "Red Hat"
+                          expr: |
+                            bsod_virtio_package_version unless on(vm_name) bsod_virtio_driver_outdated
+                          for: 0m
+                          labels:
+                            severity: info
+                            bsod_domain: driver
+                            kcs: "7141291"
+
+        # Alert: CrashDump disabled (from custom textfile collector)
+        # Requires: bsod-textfile-collector.ps1 running in guest
+                        - alert: BSODRisk_CrashDumpDisabled
+                          annotations:
+                            summary: "Windows VM crash dump collection disabled"
+                            description: |
+                              Windows VM {{ $labels.vm_name }} has CrashDumpEnabled=0. If a BSOD occurs,
+                              no memory dump will be generated, making root cause analysis impossible.
+                              Set CrashDumpEnabled to 7 (Automatic) or 2 (Kernel dump).
+                            runbook_url: "https://access.redhat.com/solutions/7128506"
+                            contact_first: "Microsoft"
+                          expr: |
+                            bsod_crashdump_enabled == 0
+                          for: 0m
+                          labels:
+                            severity: warning
+                            bsod_domain: config
+                            kcs: "7128506"
+
+        # Alert: Guest-observed CPU saturation (from windows_exporter's cpu collector)
+        # Requires: windows_exporter with cpu collector enabled (enabled by
+        # default and by install-windows-exporter.ps1's ENABLED_COLLECTORS)
+        # Risk: sustained near-100% in-guest CPU competes with the same
+        # scheduling-timing sensitivity BSODRisk_HostCPUContention addresses
+        # from the hypervisor side (CLOCK_WATCHDOG_TIMEOUT 0x101) -- this is
+        # the guest's OWN view, so it also catches saturation caused by the
+        # guest's workload itself, not only host-side contention.
+        # Recommendation 6 (Wave 7, R-46): install-windows-exporter.ps1 has
+        # always enabled this collector, but nothing downstream consumed its
+        # metrics before this -- the data was collected at the guest and
+        # discarded end-to-end. See scripts/ci/validate-metric-names.py for
+        # the verified metric name (windows_cpu_time_total, mode label).
+        # [GENERAL-KNOWLEDGE]
+        #
+        # KNOWN LIMITATION (deliberate, not an oversight): this alert-only
+        # implementation is the ONLY detection path for guest-observed CPU/
+        # memory saturation -- there is no bsod_resource_checks.py analyzer
+        # counterpart, unlike pagefile/driver-version, which also have a
+        # must-gather-collected path (collect-windows-guest-info.ps1's WMI
+        # snapshot) independent of whether windows_exporter/Prometheus is
+        # deployed. A customer who never deploys windows_exporter (an
+        # optional add-on, per windows-exporter/README.md) gets ZERO
+        # CPU/memory saturation signal from an offline must-gather audit,
+        # even though check_memory_pressure/check_cpu_overcommit already
+        # exist in bsod_resource_checks.py for the analogous HYPERVISOR-side
+        # (cAdvisor cgroup) view via runtime/cluster/vm-metrics.json and
+        # node-metrics.json -- both themselves currently unpopulated by any
+        # collection script (see must-gather/README.md's documented-but-not-
+        # yet-collected layout). Adding a guest-reported analyzer path would
+        # require a new must-gather collection step to snapshot a live
+        # Thanos/Prometheus query of the windows_cpu_time_total,
+        # windows_memory_physical_free_bytes, and
+        # windows_memory_physical_total_bytes metrics per VM, which is out
+        # of scope for R-46 as originally scoped ("no
+        # additional collection or must-gather change"). Deliberately left
+        # unimplemented rather than silently gapped -- revisit if a real
+        # must-gather-only (no live Prometheus) audit needs this signal.
+                        - alert: BSODRisk_GuestCPUSaturation
+                          annotations:
+                            summary: "Windows VM guest-observed CPU saturation"
+                            description: |
+                              Windows VM {{ $labels.vm_name }} reports {{ $value | humanize }}%
+                              average CPU utilization (100% minus the idle-mode share) over the
+                              last 5 minutes, sustained at or above the 90% saturation
+                              threshold. Sustained near-100% CPU competes for the same
+                              scheduling timing Windows guests need to avoid
+                              CLOCK_WATCHDOG_TIMEOUT (0x101) BSODs. Investigate the in-guest
+                              workload (Task Manager / Resource Monitor) and, if host-side
+                              contention is also suspected, check BSODRisk_HostCPUContention
+                              for this VM's node.
+                            runbook_url: "https://access.redhat.com/solutions/7132511"
+                            contact_first: "Microsoft (guest workload) / Red Hat (if host contention is also firing)"
+                            stop_codes: "0x101"
+                          expr: |
+                            100 - (100 * avg by (vm_name, vm_namespace) (rate(windows_cpu_time_total{mode="idle"}[5m]))) > 90
+                          for: 15m
+                          labels:
+                            severity: warning
+                            bsod_domain: cpu
+                            kcs: "7132511"
+
+        # Alert: Guest-observed physical memory saturation (windows_exporter's
+        # memory collector)
+        # Requires: windows_exporter with memory collector enabled (enabled by
+        # default and by install-windows-exporter.ps1's ENABLED_COLLECTORS)
+        # Risk: Amplifies MEMORY_MANAGEMENT (0x1A) BSOD risk via pagefile
+        # pressure, same as BSODRisk_MemoryPressure/BSODRisk_PagefilePressure,
+        # but measured from INSIDE the guest's own physical-memory accounting
+        # rather than the hypervisor's ballooned-domain view or the pagefile
+        # collector specifically.
+        # Recommendation 6 (Wave 7, R-46): see BSODRisk_GuestCPUSaturation's
+        # comment above -- same collected-and-discarded defect, memory axis.
+        # [GENERAL-KNOWLEDGE]
+                        - alert: BSODRisk_GuestMemorySaturation
+                          annotations:
+                            summary: "Windows VM guest-observed physical memory saturation"
+                            description: |
+                              Windows VM {{ $labels.vm_name }} reports {{ $value | humanize }}%
+                              physical memory utilization, at or above the 90% saturation
+                              threshold. Sustained high physical memory pressure amplifies the
+                              risk of MEMORY_MANAGEMENT (0x1A) BSODs when the system cannot
+                              page out fast enough. Cross-check BSODRisk_PagefilePressure and
+                              BSODRisk_MemoryPressure for this VM; if this fires without
+                              either of those, pagefile/domain-level accounting may be
+                              under-reporting real guest memory pressure.
+                            runbook_url: "https://access.redhat.com/solutions/7132512"
+                            contact_first: "Microsoft (if no recent platform changes)"
+                            stop_codes: "0x1A"
+                          expr: |
+                            100 - (100 * windows_memory_physical_free_bytes / windows_memory_physical_total_bytes) > 90
+                          for: 15m
+                          labels:
+                            severity: warning
+                            bsod_domain: resource
+                            kcs: "7132512"
+
+        # Alert: Windows VM restarted unexpectedly (proxy for BSOD crash detection)
+        # Requires: windows_exporter deployed (ServiceMonitor scraping vm_name targets)
+        # Heuristic: exporter goes down while VMI still exists in KubeVirt, AND the VM
+        # genuinely re-entered Running recently. Does NOT depend on
+        # kubevirt_vmi_guest_os_panic_total (not yet shipping).
+        #
+        # v0.17.0 fix (deep-dive review F1): the original implementation was missing a
+        # phase-change guard, so it fired on ANY exporter-unreachable VM (firewall,
+        # exporter service stopped, etc.), not just genuine crash/restart patterns --
+        # confirmed 17/21 monitored VMs false-positive on a live cluster. The roadmap's
+        # originally-proposed guard, `changes(kubevirt_vmi_phase_count[10m]) > 1`, is
+        # NOT usable here: `kubevirt_vmi_phase_count` is a deprecated, node/phase-scoped
+        # aggregate (replaced upstream by `node:kubevirt_vmi_phase:sum`) with no
+        # `name`/`namespace` labels to join on -- `and on(name, namespace)` against it
+        # would always yield an empty vector, silently making the alert NEVER fire again
+        # (a worse regression than the false-positive storm it was meant to fix). Uses
+        # `kubevirt_vm_running_status_last_transition_timestamp_seconds` instead -- a
+        # native, per-VM (name/namespace-labeled) virt-controller metric already scraped
+        # by the standard OCP Virt monitoring stack (no additional guest-side dependency
+        # beyond windows_exporter for the `up` term). A VM whose most recent transition
+        # to Running was within the last 10 minutes has genuinely restarted recently;
+        # this excludes VMs where the exporter is merely unreachable but the guest itself
+        # has been Running, unchanged, for longer than that.
+        # Known false positives: planned reboots (Windows Update, manual restart) within
+        # the same 10-minute window still trigger this -- acceptable at warning severity.
+        # Acceptable at warning severity -- operators investigate via Layer 4 scripts.
+        # KCS: 7141291
+        # [GENERAL-KNOWLEDGE]
+                        - alert: BSODRisk_GuestUnexpectedRestart
+                          annotations:
+                            summary: "Windows VM restarted unexpectedly -- possible BSOD"
+                            description: |
+                              Windows VM {{ $labels.vm_name }}: windows_exporter target is down while the
+                              VMI still exists in KubeVirt and the VM re-entered Running within the last
+                              10 minutes, indicating a guest-level crash or unexpected reboot (BSOD on
+                              Windows). Collect crash dump and run:
+                                cnv-win-bsod-audit.sh <namespace> <vm-name>
+                              If crash dump exists, open a support case with the gate report and dump.
+                            runbook_url: "https://access.redhat.com/solutions/7141291"
+                            contact_first: "Red Hat (if recent platform/driver change) / Microsoft (if no changes)"
+                            stop_codes: "varies (check Windows minidump or virt-launcher logs)"
+                          expr: |
+                            (
+                              label_replace(up{job=~"bsod-windows-exporter.*"} == 0, "name", "$1", "vm_name", "(.*)")
+                            )
+                            and on(name, namespace)
+                            kubevirt_vmi_info
+                            and on(name, namespace)
+                            ((time() - kubevirt_vm_running_status_last_transition_timestamp_seconds) < 600)
+                          for: 2m
+                          labels:
+                            severity: warning
+                            bsod_domain: crash
+                            kcs: "7141291"

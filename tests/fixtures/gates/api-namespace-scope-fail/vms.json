@@ -1,0 +1,159 @@
+{
+  "items": [
+    {
+      "apiVersion": "kubevirt.io/v1",
+      "kind": "VirtualMachine",
+      "metadata": {
+        "name": "win2k22-good",
+        "namespace": "bsod-test",
+        "labels": {
+          "vm.kubevirt.io/os": "windows2k22",
+          "vm.kubevirt.io/template": "windows2k22-server-medium",
+          "vm.kubevirt.io/template.version": "v0.32.2",
+          "app.kubernetes.io/part-of": "bsod-test",
+          "bsod-test/scenario": "baseline"
+        },
+        "annotations": {
+          "vm.kubevirt.io/os": "windows2k22"
+        }
+      },
+      "spec": {
+        "runStrategy": "Halted",
+        "template": {
+          "metadata": {
+            "annotations": {
+              "vm.kubevirt.io/os": "windows2k22",
+              "vm.kubevirt.io/flavor": "medium",
+              "vm.kubevirt.io/workload": "server"
+            },
+            "labels": {
+              "kubevirt.io/domain": "win2k22-good",
+              "vm.kubevirt.io/name": "win2k22-good"
+            }
+          },
+          "spec": {
+            "architecture": "amd64",
+            "domain": {
+              "clock": {
+                "timer": {
+                  "hpet": {
+                    "present": false
+                  },
+                  "hyperv": {},
+                  "pit": {
+                    "tickPolicy": "delay"
+                  },
+                  "rtc": {
+                    "tickPolicy": "catchup"
+                  }
+                },
+                "utc": {}
+              },
+              "cpu": {
+                "cores": 2,
+                "sockets": 1,
+                "threads": 1,
+                "model": "host-model"
+              },
+              "devices": {
+                "disks": [
+                  {
+                    "name": "rootdisk",
+                    "bootOrder": 1,
+                    "disk": {
+                      "bus": "virtio"
+                    }
+                  },
+                  {
+                    "name": "virtiocontainerdisk",
+                    "cdrom": {
+                      "bus": "sata"
+                    }
+                  }
+                ],
+                "interfaces": [
+                  {
+                    "name": "default",
+                    "masquerade": {},
+                    "model": "virtio"
+                  }
+                ],
+                "inputs": [
+                  {
+                    "name": "tablet",
+                    "type": "tablet",
+                    "bus": "usb"
+                  }
+                ],
+                "tpm": {
+                  "persistent": true
+                }
+              },
+              "features": {
+                "acpi": {},
+                "apic": {},
+                "hyperv": {
+                  "frequencies": {},
+                  "ipi": {},
+                  "reenlightenment": {},
+                  "relaxed": {},
+                  "reset": {},
+                  "runtime": {},
+                  "spinlocks": {
+                    "spinlocks": 8191
+                  },
+                  "synic": {},
+                  "synictimer": {
+                    "direct": {}
+                  },
+                  "tlbflush": {},
+                  "vapic": {},
+                  "vpindex": {}
+                },
+                "smm": {}
+              },
+              "firmware": {
+                "bootloader": {
+                  "efi": {
+                    "persistent": true,
+                    "secureBoot": true
+                  }
+                }
+              },
+              "memory": {
+                "guest": "4Gi"
+              },
+              "resources": {
+                "requests": {
+                  "memory": "4Gi"
+                }
+              }
+            },
+            "evictionStrategy": "LiveMigrate",
+            "networks": [
+              {
+                "name": "default",
+                "pod": {}
+              }
+            ],
+            "terminationGracePeriodSeconds": 3600,
+            "volumes": [
+              {
+                "name": "rootdisk",
+                "persistentVolumeClaim": {
+                  "claimName": "win2k22-good-rootdisk"
+                }
+              },
+              {
+                "name": "virtiocontainerdisk",
+                "containerDisk": {
+                  "image": "registry.redhat.io/container-native-virtualization/virtio-win-rhel9@sha256:17b76af03fe7a3f45d63b3e8a9a2ddc3231100619d0e158f73997916580dec68"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

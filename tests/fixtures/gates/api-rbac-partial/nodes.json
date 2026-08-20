@@ -1,0 +1,26 @@
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "worker-1",
+        "labels": {
+          "node-role.kubernetes.io/worker": "",
+          "kubernetes.io/hostname": "worker-1",
+          "cpu-vendor.node.kubevirt.io/Intel": "true",
+          "cpu-timer.node.kubevirt.io/tsc-frequency": "2000000000"
+        }
+      }
+    },
+    {
+      "metadata": {
+        "name": "worker-2",
+        "labels": {
+          "node-role.kubernetes.io/worker": "",
+          "kubernetes.io/hostname": "worker-2",
+          "cpu-vendor.node.kubevirt.io/Intel": "true",
+          "cpu-timer.node.kubevirt.io/tsc-frequency": "2000000000"
+        }
+      }
+    }
+  ]
+}

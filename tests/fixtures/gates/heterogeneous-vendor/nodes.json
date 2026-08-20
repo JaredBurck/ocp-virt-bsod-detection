@@ -1,0 +1,36 @@
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "worker-intel-1",
+        "labels": {
+          "node-role.kubernetes.io/worker": "",
+          "kubernetes.io/hostname": "worker-intel-1",
+          "cpu-vendor.node.kubevirt.io/Intel": "true",
+          "cpu-model.node.kubevirt.io/Skylake-Server": "true",
+          "cpu-feature.node.kubevirt.io/sse4_2": "true",
+          "cpu-feature.node.kubevirt.io/avx": "true",
+          "cpu-feature.node.kubevirt.io/avx2": "true",
+          "cpu-timer.node.kubevirt.io/tsc-frequency": "2095078000"
+        }
+      }
+    },
+    {
+      "metadata": {
+        "name": "worker-amd-1",
+        "labels": {
+          "node-role.kubernetes.io/worker": "",
+          "kubernetes.io/hostname": "worker-amd-1",
+          "cpu-vendor.node.kubevirt.io/AMD": "true",
+          "cpu-family.node.kubevirt.io/26": "true",
+          "cpu-model.node.kubevirt.io/EPYC-Milan": "true",
+          "cpu-feature.node.kubevirt.io/sse4_2": "true",
+          "cpu-feature.node.kubevirt.io/avx": "true",
+          "cpu-feature.node.kubevirt.io/avx2": "true",
+          "cpu-feature.node.kubevirt.io/svm": "true",
+          "cpu-timer.node.kubevirt.io/tsc-frequency": "2445234000"
+        }
+      }
+    }
+  ]
+}

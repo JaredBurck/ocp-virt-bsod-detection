@@ -1,0 +1,79 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-python-validators:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -q pyyaml pytest
+      - name: Shared-threshold consistency
+        run: |
+          python3 scripts/ci/validate-shared-thresholds.py
+          python3 -m pytest scripts/ci/test_validate_shared_thresholds.py -v
+      - name: Base-image pin unit tests
+        run: python3 -m pytest scripts/ci/test_validate_base_image_pins.py -v
+      - name: serve-metrics unit tests
+        run: python3 -m pytest scripts/ci/test_serve_metrics.py -v
+      - name: Customer-export allowlist tests
+        run: python3 -m pytest scripts/ci/test_validate_customer_export.py -v
+      - name: Public Layer 3/4 docs
+        run: |
+          python3 scripts/ci/validate-public-layer34-docs.py
+          python3 -m pytest scripts/ci/test_validate_public_layer34_docs.py -v
+
+  test-bash-verdicts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install jq
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
+      - name: Run bash verdict tests
+        run: bash tests/test_bash_verdict.sh
+
+  test-ps-verdicts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install PowerShell
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y powershell
+      - name: Run PowerShell verdict tests
+        shell: pwsh
+        run: |
+          ./tests/test_ps_verdict.ps1
+          ./tests/test_ps_protect_guest_staging_dir.ps1
+          ./tests/test_ps_export_remediation.ps1
+
+  test-bash-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install jq and python
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq python3 python3-yaml
+      - name: Gate and contract harnesses
+        run: |
+          bash tests/test_bash_gates.sh
+          bash tests/test_bash_json_output.sh
+          bash tests/test_windows_vm_name_regex.sh
+          bash tests/test_fleet_readiness.sh
+          bash tests/test_plan_gate_amd_verdict.sh
+          bash tests/test_severity_contract.sh
+          bash tests/test_risk_tier_contract.sh
+          bash tests/test_prehook_contract.sh
+          bash tests/test_strict_flag_contract.sh
+          bash tests/test_qga_harden_staging_dir.sh
+          bash tests/test_qga_primitives.sh
+          bash tests/test_storage_latency_exit_codes.sh
+          bash tests/test_risk_scoring_override.sh
+          bash tests/test_bash_fleet_exporter.sh

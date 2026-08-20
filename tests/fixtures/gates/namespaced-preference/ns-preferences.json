@@ -1,0 +1,40 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "instancetype.kubevirt.io/v1beta1",
+      "kind": "VirtualMachinePreference",
+      "metadata": {
+        "name": "windows.2k22",
+        "namespace": "bsod-test",
+        "labels": {
+          "instancetype.kubevirt.io/os-type": "windows"
+        }
+      },
+      "spec": {
+        "devices": {
+          "preferredDiskBus": "virtio",
+          "preferredInterfaceModel": "virtio"
+        },
+        "machine": {
+          "preferredMachineType": "pc-q35-rhel9.6.0"
+        },
+        "features": {
+          "preferredHyperv": {
+            "relaxed": {},
+            "vapic": {},
+            "spinlocks": { "spinlocks": 8191 },
+            "vpindex": {},
+            "synic": {},
+            "synictimer": {},
+            "frequencies": {},
+            "reenlightenment": {},
+            "tlbflush": {},
+            "ipi": {}
+          }
+        }
+      }
+    }
+  ]
+}

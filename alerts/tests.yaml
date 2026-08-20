@@ -1,0 +1,1964 @@
+rule_files:
+  - _rules_only.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # --- Positive tests: alerts SHOULD fire ---
+
+  - interval: 1m
+    input_series:
+      - series: 'bsod:vmi_disk_latency:avg_1h{name="win-vm1",namespace="test"}'
+        values: '2x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BSODRisk_StorageLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              bsod_domain: storage
+              kcs: "7132512"
+              name: win-vm1
+              namespace: test
+            exp_annotations:
+              summary: "VM disk I/O latency severely degraded -- BSOD risk"
+              description: |
+                VM win-vm1 in namespace test has averaged
+                2s per disk I/O over the last hour on its WORST
+                direction (read or write), at or above the 1.0s severe-degradation threshold. Individual I/Os in this regime routinely
+                exceed the 60s VirtIO IoTimeoutValue, triggering MEMORY_MANAGEMENT (0x1A) or
+                KERNEL_DATA_INPAGE_ERROR (0x7A) BSODs.
+              runbook_url: "https://access.redhat.com/solutions/7132512"
+              contact_first: "Red Hat (if recent platform change) / Microsoft (if no changes)"
+              stop_codes: "0x1A, 0x7A, 0x50, 0xEF"
+              calibration_status: |
+                This threshold (1.0s, shared/storage-latency-thresholds.json) was adopted by
+                operator decision on 2026-07-28, replacing a defective 30s/op mean that could
+                only fire after a Windows guest had already bugchecked. Calibration is PARTIAL
+                (measured 2026-07-29 on a test/workshop cluster) -- see _calibration_status in
+                shared/storage-latency-thresholds.json for what that measurement does and does
+                not establish. If this alert fires or is persistently noisy/quiet for your
+                storage backend, see the "Storage latency calibration" section in
+                docs/admin-runbook.md before treating the threshold itself as ground truth.
+
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_memory_used_bytes{name="win-vm2",namespace="test"}'
+        values: '900000000x35'
+      - series: 'kubevirt_vmi_memory_domain_bytes{name="win-vm2",namespace="test"}'
+        values: '1000000000x35'
+      - series: 'kubevirt_vmi_info{name="win-vm2",namespace="test",os="windows",evictable="true"}'
+        values: '1x35'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: BSODRisk_MemoryPressure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: resource
+              kcs: "7132512"
+              name: win-vm2
+              namespace: test
+            exp_annotations:
+              summary: "VM memory pressure increases BSOD risk"
+              description: |
+                VM win-vm2 in namespace test has sustained
+                memory utilization above 85% for 30 minutes. Pagefile pressure on slow
+                storage amplifies MEMORY_MANAGEMENT (0x1A) BSOD risk.
+              runbook_url: "https://access.redhat.com/solutions/7132512"
+              contact_first: "Microsoft (if no recent platform changes)"
+              stop_codes: "0x1A"
+
+  # NOTE (2026-07-10): kubevirt_vmi_guest_os_panic_total does not exist on any
+  # shipping OCP Virt release yet (confirmed on a live 4.19.25 cluster) -- see
+  # the BSODRisk_GuestCrash comment in bsod-risk-prometheusrules.yaml. This
+  # test only proves the PromQL/alert-routing logic is correct for the day
+  # HCO/CNV ships the metric; it does not imply the alert fires in production
+  # today.
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_guest_os_panic_total{name="win-vm3",namespace="test"}'
+        values: '0 0 0 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BSODRisk_GuestCrash
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              bsod_domain: crash
+              kcs: "7141291"
+              bsod_status: preview
+              name: win-vm3
+              namespace: test
+            exp_annotations:
+              summary: "Windows VM BSOD detected -- pre-crash risk context available"
+              description: |
+                VM win-vm3 in namespace test triggered a
+                guest OS panic event (GUEST_PANICKED or GUEST_CRASHLOADED via QMP).
+                This indicates a Windows BSOD has occurred. If GUEST_PANICKED (not
+                CRASHLOADED), no memory dump was generated -- check for VirtIO VGA
+                adapter (KCS-7141988).
+                Immediate actions:
+                  1. Run: cnv-win-bsod-audit.sh test win-vm3
+                  2. Collect guest crash dump: cnv-qga-fleet-collect.sh --namespace test --vm win-vm3 --stage
+                  3. Open Red Hat support case with gate report + crash dump
+                Pre-crash risk factors available via: bsod:vm_risk_factor_count:gauge
+              runbook_url: "https://access.redhat.com/solutions/7141291"
+              contact_first: "Red Hat (if recent virtio-win update or migration) / Microsoft (if no changes)"
+              stop_codes: "varies (check Windows minidump or virt-launcher logs)"
+              status: |
+                PREVIEW -- this alert depends on kubevirt_vmi_guest_os_panic_total,
+                which no released HCO/CNV build exposes as of 2026-07-28. It cannot
+                fire on any currently shipping OpenShift Virtualization release.
+                Do not treat a quiet BSODRisk_GuestCrash as evidence that no guest
+                has crashed. Inspect virt-launcher logs for GUEST_PANICKED /
+                GUEST_CRASHLOADED and attach them with gate --json to the support
+                case. If this alert DOES fire, the metric has shipped and this
+                rule has never been exercised against real data -- verify against
+                virt-launcher logs before acting on it.
+
+  # Positive: migration + heterogeneous cluster (AMD + Intel nodes present,
+  # recording rule evaluates to 2) fires BSODRisk_HeterogeneousCPUMigration
+  # at warning severity (R-9).
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_migration_phase_transition_time_from_creation_seconds_count{phase="Running"}'
+        values: '0 0 0 1 1 1'
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true",label_cpu_feature_node_kubevirt_io_amd_psfd="true",node="amd-worker-1"}'
+        values: '1x10'
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_intel="true",label_cpu_feature_node_kubevirt_io_pku="true",node="intel-worker-1"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BSODRisk_HeterogeneousCPUMigration
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: cpu
+              kcs: "7125237"
+              phase: Running
+            exp_annotations:
+              summary: "VM migration on heterogeneous CPU cluster -- BSOD risk"
+              description: |
+                A VirtualMachineInstance migration reached the Running phase on a cluster
+                with heterogeneous CPU capability groups (differing CPU feature sets --
+                mixed vendors OR mixed generations of the same vendor, e.g. EPYC Rome
+                alongside EPYC Milan). Migrations across mixed CPU
+                architectures can trigger CLOCK_WATCHDOG_TIMEOUT (0x101) or
+                MACHINE_CHECK_EXCEPTION (0x9C) on Windows VMs. Verify that source and
+                target node CPU features are compatible. Run:
+                  cnv-win-bsod-audit.sh <namespace> <vm-name>
+                Compare worker `cpu-feature.node.kubevirt.io/*` labels if Gate 4 WARNs;
+                attach `--json` to the support case.
+              runbook_url: "https://access.redhat.com/solutions/7125237"
+              contact_first: "Red Hat"
+              stop_codes: "0x101, 0x9C"
+
+  # Positive: migration + NO kube_node_labels data at all (fallback
+  # conservative path) fires BSODRisk_HeterogeneousCPUMigration via the
+  # `unless` clause. Preserves backward compatibility for clusters without
+  # the kube-state-metrics CPU-vendor allowlist (pre-OCP 4.14). In this case
+  # the recording rule evaluates to vector(0) = 0, not absent, so the unless
+  # clause needs the recording rule to be truly absent. We test with a
+  # scenario where the recording rule group is not producing data.
+  # NOTE: When the recording rule produces 0 (no vendor labels), the first
+  # branch `> 1` is false and the second branch `unless bsod:...` is also
+  # false (series present but value 0). So migrations on clusters without
+  # CPU-vendor labels DO NOT fire. This is acceptable because the absence of
+  # vendor labels means the cluster either doesn't have KubeVirt or isn't
+  # configured -- no Windows VMs at risk.
+
+  # Negative: migration + HOMOGENEOUS cluster (only Intel nodes, recording
+  # rule evaluates to 1) must NOT fire BSODRisk_HeterogeneousCPUMigration.
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_migration_phase_transition_time_from_creation_seconds_count{phase="Running"}'
+        values: '0 0 0 1 1 1'
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_intel="true",label_cpu_feature_node_kubevirt_io_pku="true",node="intel-worker-1"}'
+        values: '1x10'
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_intel="true",label_cpu_feature_node_kubevirt_io_pku="true",node="intel-worker-2"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BSODRisk_HeterogeneousCPUMigration
+        exp_alerts: []
+
+  # Negative: heterogeneous cluster (AMD + Intel) but NO migration (flat
+  # counter) -- heterogeneity alone must not fire; migration event required.
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_migration_phase_transition_time_from_creation_seconds_count{phase="Running"}'
+        values: '0x10'
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true",label_cpu_feature_node_kubevirt_io_amd_psfd="true",node="amd-worker-1"}'
+        values: '1x10'
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_intel="true",label_cpu_feature_node_kubevirt_io_pku="true",node="intel-worker-1"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BSODRisk_HeterogeneousCPUMigration
+        exp_alerts: []
+
+  # Positive: also carries a `namespace` label on the raw series, mirroring
+  # the scrape-target metadata kube-state-metrics stamps onto kube_node_labels
+  # in real clusters (namespace=openshift-monitoring, where kube-state-metrics
+  # itself runs -- Nodes are not namespaced objects). The alert's `count by
+  # (node)` aggregation must strip it (and label_cpu_vendor_node_kubevirt_io_amd)
+  # so the fired alert is not mistaken for a VM-scoped alert with a real VM
+  # namespace -- see the "NAMESPACE LABEL" comment in bsod-risk-prometheusrules.yaml.
+  - interval: 1m
+    input_series:
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true",node="amd-worker-1",namespace="openshift-monitoring"}'
+        values: '1x35'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: BSODRisk_AMDNodeRequiresMicrocodeVerification
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              bsod_domain: cpu
+              kcs: "7132511"
+              node: amd-worker-1
+            exp_annotations:
+              summary: "AMD node detected -- verify microcode version manually"
+              description: |
+                Node amd-worker-1 is running AMD CPUs. No Prometheus metric exposes
+                microcode version; manual verification is required. Use
+                'oc debug node/amd-worker-1 -- cat /proc/cpuinfo | grep microcode'
+                to verify version is >= 0xb002151. Outdated AMD microcode can trigger
+                PFN_LIST_CORRUPT (0x4E) BSODs on Windows VMs.
+              runbook_url: "https://access.redhat.com/solutions/7132511"
+              contact_first: "Red Hat"
+              stop_codes: "0x4E"
+              prerequisite: |
+                This alert requires kube_node_labels to include KubeVirt CPU-vendor node labels.
+                On OCP 4.14+ (kube-state-metrics with nodes=[*] allowlist), these are exposed by
+                default. On older versions, configure via:
+                oc -n openshift-monitoring edit configmap cluster-monitoring-config
+                Add: kubeStateMetrics.metricLabelsAllowlist.nodes=[cpu-vendor.node.kubevirt.io/*]
+              resolution: |
+                After verifying microcode >= 0xb002151 on this node, acknowledge it:
+                  oc label node amd-worker-1 bsod-microcode-verified=true
+                The alert then resolves for that node. Remove the label (or set it
+                to any other value) to re-open verification after a firmware or
+                microcode change.
+
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_info{evictable="false",os="windows",name="win-blocked",namespace="prod"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BSODRisk_EvictionBlocked
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: config
+              kcs: "7132512"
+              name: win-blocked
+              namespace: prod
+              evictable: "false"
+              os: windows
+            exp_annotations:
+              summary: "Windows VM live migration blocked -- node drain will force-stop"
+              description: |
+                Windows VM win-blocked in namespace prod has
+                evictionStrategy=LiveMigrate but is NOT live-migratable (evictable="false").
+                Common causes: persistent TPM, missing TSC frequency scheduling labels,
+                host-passthrough CPU model, or passthrough devices. On node drain, the
+                PodDisruptionBudget will block eviction, and after the drain timeout the pod
+                will be force-deleted -- causing a dirty shutdown that can trigger or
+                masquerade as a BSOD. Either resolve the migration blocker or set
+                evictionStrategy to LiveMigrateIfPossible so the VM can be stopped gracefully.
+              runbook_url: "https://access.redhat.com/solutions/7132512"
+              contact_first: "Red Hat (migration infrastructure issue)"
+              stop_codes: "N/A (dirty shutdown, not a true BSOD)"
+
+  # --- Negative tests: alerts should NOT fire ---
+
+  # Healthy latency should not trigger storage alerts.
+  # H-5: this case previously used 5 s/op as its "low latency" baseline, which
+  # the 30 s/op threshold treated as fine. 5 seconds per read is catastrophic --
+  # that the negative test used it shows how far the old threshold was from
+  # anything a real workload survives. 50ms is a realistic healthy value.
+  - interval: 1m
+    input_series:
+      - series: 'bsod:vmi_disk_latency:avg_1h{name="win-ok",namespace="test"}'
+        values: '0.05x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BSODRisk_StorageLatencyHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: BSODRisk_StorageLatencyElevated
+        exp_alerts: []
+
+  # Positive: sustained 0.6 s/op trips the leading-indicator alert but NOT the
+  # severe one -- the gap the old single 30s threshold could not express.
+  - interval: 1m
+    input_series:
+      - series: 'bsod:vmi_disk_latency:avg_1h{name="win-degraded",namespace="test"}'
+        values: '0.6x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BSODRisk_StorageLatencyElevated
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: storage
+              kcs: "7132512"
+              name: win-degraded
+              namespace: test
+            exp_annotations:
+              summary: "VM disk I/O latency elevated -- storage degradation developing"
+              description: |
+                VM win-degraded in namespace test has averaged
+                600ms per disk I/O over the last hour on its WORST
+                direction (read or write), at or above the 0.5s sustained-degradation threshold. This is a LEADING indicator: storage
+                in this state produces the tail-latency spikes that breach the 60s VirtIO
+                IoTimeoutValue and trigger MEMORY_MANAGEMENT (0x1A) or
+                KERNEL_DATA_INPAGE_ERROR (0x7A).
+                Action: investigate backing storage before latency worsens; consider
+                raising IoTimeoutValue (see shared/io-timeout-thresholds.json).
+              runbook_url: "https://access.redhat.com/solutions/7132512"
+              contact_first: "Red Hat (if recent platform change) / Microsoft (if no changes)"
+              stop_codes: "0x1A, 0x7A, 0x50, 0xEF"
+              calibration_status: |
+                This threshold (0.5s, shared/storage-latency-thresholds.json) was adopted by
+                operator decision on 2026-07-28, replacing a defective 30s/op mean that could
+                only fire after a Windows guest had already bugchecked. Calibration is PARTIAL
+                (measured 2026-07-29 on a test/workshop cluster) -- see _calibration_status in
+                shared/storage-latency-thresholds.json for what that measurement does and does
+                not establish. If this alert fires or is persistently noisy/quiet for your
+                storage backend, see the "Storage latency calibration" section in
+                docs/admin-runbook.md before treating the threshold itself as ground truth.
+      - eval_time: 20m
+        alertname: BSODRisk_StorageLatencyHigh
+        exp_alerts: []
+
+  # Memory at 50% should not trigger pressure alert
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_memory_used_bytes{name="win-ok2",namespace="test"}'
+        values: '500000000x35'
+      - series: 'kubevirt_vmi_memory_domain_bytes{name="win-ok2",namespace="test"}'
+        values: '1000000000x35'
+      - series: 'kubevirt_vmi_info{name="win-ok2",namespace="test",os="windows",evictable="true"}'
+        values: '1x35'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: BSODRisk_MemoryPressure
+        exp_alerts: []
+
+  # Non-Windows VM at high memory should not trigger (os label mismatch)
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_memory_used_bytes{name="linux-vm",namespace="test"}'
+        values: '950000000x35'
+      - series: 'kubevirt_vmi_memory_domain_bytes{name="linux-vm",namespace="test"}'
+        values: '1000000000x35'
+      - series: 'kubevirt_vmi_info{name="linux-vm",namespace="test",os="rhel9",evictable="true"}'
+        values: '1x35'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: BSODRisk_MemoryPressure
+        exp_alerts: []
+
+  # Regression / known-limitation proof (see README "Known Limitations" and
+  # docs/operator-runbook.md "os Label Dependency"): a genuinely-Windows VM
+  # whose VMI lacks the vm.kubevirt.io/os annotation reports os="<none>" (the
+  # literal string KubeVirt's vmistats_collector defaults to, not an absent
+  # label). Even at 95% memory utilization, the alert MUST NOT fire -- this is
+  # the documented silent-no-fire gap, not a bug to "fix" here.
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_memory_used_bytes{name="win-no-os-annotation",namespace="test"}'
+        values: '950000000x35'
+      - series: 'kubevirt_vmi_memory_domain_bytes{name="win-no-os-annotation",namespace="test"}'
+        values: '1000000000x35'
+      - series: 'kubevirt_vmi_info{name="win-no-os-annotation",namespace="test",os="<none>",evictable="true"}'
+        values: '1x35'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: BSODRisk_MemoryPressure
+        exp_alerts: []
+
+  # No panic events should not trigger crash alert
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_guest_os_panic_total{name="win-stable",namespace="test"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BSODRisk_GuestCrash
+        exp_alerts: []
+
+  # --- H-5 burst rule: tail-latency approximation ---
+  # The case the old 30s hourly-mean threshold could never catch: a VM whose
+  # HOURLY MEAN looks healthy but which suffers a multi-second spike. That spike
+  # shape is what actually breaches the 60s VirtIO IoTimeoutValue.
+  #
+  # 60 min of fast reads (10ms), a 5-minute RAMP, then a plateau at 8 s/op. The
+  # 1h mean stays around 0.046s -- far under 0.5s -- so neither sustained alert
+  # fires and only the burst rule sees the spike.
+  #
+  # The ramp is load-bearing, not decoration. An instantaneous step in BOTH
+  # counters (throughput collapsing to 0.6 IOPS in the same scrape that latency
+  # jumps to 8s) makes rate() extrapolate across the discontinuity and emit a
+  # single-sample transient far above the true plateau -- 23s at t=65m on
+  # promtool 2.x, 28s at t=64m on 3.x. Whether the [1h:5m] subquery grid lands
+  # on that sample is pure alignment luck, so the same data yielded 23 on
+  # promtool 2.x and 8 on 3.x and the CI version matrix failed on 3.7.3 only.
+  # Ramping the transition over ~5 minutes (which is also what real storage
+  # degradation looks like) makes the plateau the unambiguous maximum: verified
+  # to return exactly 8 on 2.39.1 / 2.48.0 / 2.55.1 / 3.7.3, and at every
+  # eval_time from 76m to 82m.
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_storage_read_times_seconds_total{name="win-spike",namespace="test",drive="sda"}'
+        values: '0+0.6x60 37.5 40.5 44.5 49.1 53.9+4.8x15'
+      - series: 'kubevirt_vmi_storage_iops_read_total{name="win-spike",namespace="test",drive="sda"}'
+        values: '0+60x60 3640 3660 3670 3674 3674.6+0.6x15'
+    alert_rule_test:
+      - eval_time: 80m
+        alertname: BSODRisk_StorageLatencyBurst
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              bsod_domain: storage
+              kcs: "7132512"
+              name: win-spike
+              namespace: test
+              drive: sda
+            exp_annotations:
+              summary: "VM disk I/O latency burst -- transient spike toward VirtIO timeout"
+              description: |
+                VM win-spike in namespace test saw a 5-minute
+                window averaging 8s per disk I/O on its worst direction
+                (read or write) within the last hour,
+                at or above the 5s burst threshold -- even though its hourly mean may look
+                healthy. Transient spikes of this shape are what breach the 60s VirtIO
+                IoTimeoutValue and produce MEMORY_MANAGEMENT (0x1A) BSODs.
+                NOTE: this is an APPROXIMATION of tail latency. KubeVirt does not expose
+                histogram buckets, so a true p99 cannot be computed.
+              runbook_url: "https://access.redhat.com/solutions/7132512"
+              contact_first: "Red Hat (if recent platform change) / Microsoft (if no changes)"
+              stop_codes: "0x1A, 0x7A, 0x50, 0xEF"
+              calibration_status: |
+                This threshold (5s, shared/storage-latency-thresholds.json) was adopted by
+                operator decision on 2026-07-28. It is also a tail-latency APPROXIMATION (no
+                true p99 available -- see NOTE above), and calibration is PARTIAL (measured
+                2026-07-29 on a test/workshop cluster) -- see _calibration_status in
+                shared/storage-latency-thresholds.json for what that measurement does and does
+                not establish. If this alert fires or is persistently noisy/quiet for your
+                storage backend, see the "Storage latency calibration" section in
+                docs/admin-runbook.md before treating the threshold itself as ground truth.
+      # THE POINT OF THE BURST RULE: the same VM's hourly mean is healthy, so
+      # neither sustained alert fires. Before H-5 this spike was invisible to
+      # every hypervisor-side alert the framework shipped.
+      - eval_time: 80m
+        alertname: BSODRisk_StorageLatencyElevated
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: BSODRisk_StorageLatencyHigh
+        exp_alerts: []
+
+  # Negative: consistently fast storage produces no burst.
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_storage_read_times_seconds_total{name="win-fast",namespace="test",drive="sda"}'
+        values: '0+0.6x80'
+      - series: 'kubevirt_vmi_storage_iops_read_total{name="win-fast",namespace="test",drive="sda"}'
+        values: '0+60x80'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: BSODRisk_StorageLatencyBurst
+        exp_alerts: []
+
+  # Stable latency should not trigger trending alert.
+  # BSODRisk_StorageLatencyTrending requires avg >= 0.5s AND 1h/24h ratio > 1.5.
+  # Flat values produce ratio = 1.0, so neither condition alone fires it.
+  - interval: 1m
+    input_series:
+      - series: 'bsod:vmi_disk_latency:avg_1h{name="win-stable-hist",namespace="test",drive="sda"}'
+        values: '0.05x100'
+      - series: 'bsod:vmi_disk_latency:avg_24h{name="win-stable-hist",namespace="test",drive="sda"}'
+        values: '0.05x100'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: BSODRisk_StorageLatencyTrending
+        exp_alerts: []
+
+  # Positive test: latency surges in the 1h window while 24h baseline is still low.
+  # avg_1h=0.8s, avg_24h=0.2s → ratio=4.0 (>1.5) and 0.8 >= 0.5. Fires after 30m.
+  - interval: 1m
+    input_series:
+      - series: 'bsod:vmi_disk_latency:avg_1h{name="win-degrading",namespace="test",drive="sda"}'
+        values: '0.8x50'
+      - series: 'bsod:vmi_disk_latency:avg_24h{name="win-degrading",namespace="test",drive="sda"}'
+        values: '0.2x50'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: BSODRisk_StorageLatencyTrending
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: storage
+              kcs: "7132512"
+              name: win-degrading
+              namespace: test
+              drive: sda
+            exp_annotations:
+              summary: "VM storage latency trending upward toward BSOD threshold"
+              description: |
+                VM win-degrading in namespace test has average
+                worst-direction (read or write) disk latency at or above 0.5s AND it has increased by more than 50%
+                over the 24-hour baseline. This sustained upward trend indicates storage
+                degradation heading toward the 60s VirtIO IoTimeoutValue.
+              runbook_url: "https://access.redhat.com/solutions/7132512"
+              contact_first: "Red Hat (if recent platform change) / Microsoft (if no changes)"
+              stop_codes: "0x1A, 0x7A, 0x50, 0xEF"
+
+  # Evictable Windows VM should not trigger eviction-blocked alert
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_info{evictable="true",os="windows",name="win-evictable",namespace="prod"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BSODRisk_EvictionBlocked
+        exp_alerts: []
+
+  # Regression / known-limitation proof: a non-evictable Windows VM missing
+  # the vm.kubevirt.io/os annotation (os="<none>") must NOT trigger the
+  # eviction-blocked alert, even though it is a genuine eviction-blocked
+  # Windows VM -- see README "Known Limitations" / operator-runbook "os Label
+  # Dependency". This is the documented silent-no-fire gap.
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_info{evictable="false",os="<none>",name="win-no-os-blocked",namespace="prod"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BSODRisk_EvictionBlocked
+        exp_alerts: []
+
+  # Negative: a migration that transitioned through a different phase (e.g.
+  # Failed) must not fire BSODRisk_HeterogeneousCPUMigration -- the
+  # `phase="Running"` label selector in the alert expr should exclude it.
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_migration_phase_transition_time_from_creation_seconds_count{phase="Failed"}'
+        values: '0 0 0 1 1 1'
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true",label_cpu_feature_node_kubevirt_io_amd_psfd="true",node="amd-worker-1"}'
+        values: '1x10'
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_intel="true",label_cpu_feature_node_kubevirt_io_pku="true",node="intel-worker-1"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BSODRisk_HeterogeneousCPUMigration
+        exp_alerts: []
+
+  # Negative: node explicitly labeled AMD vendor=false (e.g. an Intel node
+  # that also carries the KubeVirt cpu-vendor/AMD label key with value
+  # "false") must not trigger BSODRisk_AMDNodeRequiresMicrocodeVerification --
+  # the alert expr filters on label value "true", not just label presence.
+  - interval: 1m
+    input_series:
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="false",node="intel-worker-1"}'
+        values: '1x35'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: BSODRisk_AMDNodeRequiresMicrocodeVerification
+        exp_alerts: []
+
+  # Negative: no KubeVirt cpu-vendor label at all on the node (label
+  # allowlist not configured, or a non-AMD node with no vendor label
+  # exposed) -- series absent entirely, alert must not fire.
+  - interval: 1m
+    input_series:
+      - series: 'kube_node_labels{node="worker-no-vendor-label"}'
+        values: '1x35'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: BSODRisk_AMDNodeRequiresMicrocodeVerification
+        exp_alerts: []
+
+  # L-7 negative: an AMD node whose microcode has been verified and
+  # acknowledged with `oc label node <n> bsod-microcode-verified=true` must
+  # STOP alerting. Before L-7 the expression had no term that could ever go
+  # false, so this alert fired permanently on every AMD node.
+  - interval: 1m
+    input_series:
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true",label_bsod_microcode_verified="true",node="amd-worker-verified"}'
+        values: '1x35'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: BSODRisk_AMDNodeRequiresMicrocodeVerification
+        exp_alerts: []
+
+  # L-7 positive: acknowledging one AMD node must not suppress an unverified
+  # peer. Verification is per-node, so the alert has to remain node-scoped.
+  - interval: 1m
+    input_series:
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true",label_bsod_microcode_verified="true",node="amd-worker-verified"}'
+        values: '1x35'
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true",node="amd-worker-unverified"}'
+        values: '1x35'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: BSODRisk_AMDNodeRequiresMicrocodeVerification
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              bsod_domain: cpu
+              kcs: "7132511"
+              node: amd-worker-unverified
+            exp_annotations:
+              summary: "AMD node detected -- verify microcode version manually"
+              description: |
+                Node amd-worker-unverified is running AMD CPUs. No Prometheus metric exposes
+                microcode version; manual verification is required. Use
+                'oc debug node/amd-worker-unverified -- cat /proc/cpuinfo | grep microcode'
+                to verify version is >= 0xb002151. Outdated AMD microcode can trigger
+                PFN_LIST_CORRUPT (0x4E) BSODs on Windows VMs.
+              runbook_url: "https://access.redhat.com/solutions/7132511"
+              contact_first: "Red Hat"
+              stop_codes: "0x4E"
+              prerequisite: |
+                This alert requires kube_node_labels to include KubeVirt CPU-vendor node labels.
+                On OCP 4.14+ (kube-state-metrics with nodes=[*] allowlist), these are exposed by
+                default. On older versions, configure via:
+                oc -n openshift-monitoring edit configmap cluster-monitoring-config
+                Add: kubeStateMetrics.metricLabelsAllowlist.nodes=[cpu-vendor.node.kubevirt.io/*]
+              resolution: |
+                After verifying microcode >= 0xb002151 on this node, acknowledge it:
+                  oc label node amd-worker-unverified bsod-microcode-verified=true
+                The alert then resolves for that node. Remove the label (or set it
+                to any other value) to re-open verification after a firmware or
+                microcode change.
+
+  # --- Guest alert tests (bsod-risk-guest-alerts.yaml) ---
+
+  # Positive: Guest disk latency high (derived rate metric)
+  - interval: 1m
+    input_series:
+      - series: 'windows_logical_disk_read_seconds_total{instance="10.0.0.5:9182",vm_name="win-guest1",volume="C:"}'
+        values: '0+2x20'
+      - series: 'windows_logical_disk_reads_total{instance="10.0.0.5:9182",vm_name="win-guest1",volume="C:"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BSODRisk_GuestDiskLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              bsod_domain: storage
+              kcs: "7132512"
+              instance: "10.0.0.5:9182"
+              vm_name: win-guest1
+              volume: "C:"
+            exp_annotations:
+              summary: "Windows VM guest-visible disk latency severely degraded"
+              description: |
+                Windows VM win-guest1 reports guest-visible average disk read
+                latency of 2s via windows_exporter, at or above the
+                1.0s severe-degradation threshold. This is measured INSIDE the guest and
+                directly reflects what the VirtIO driver experiences -- individual I/Os in
+                this regime approach the 60s IoTimeoutValue that triggers BSODs.
+              runbook_url: "https://access.redhat.com/solutions/7132512"
+              contact_first: "Red Hat (if recent platform change) / Microsoft (if no changes)"
+              stop_codes: "0x1A, 0x7A, 0x50"
+
+  # Negative: Guest disk latency low
+  - interval: 1m
+    input_series:
+      - series: 'windows_logical_disk_read_seconds_total{instance="10.0.0.5:9182",vm_name="win-ok",volume="C:"}'
+        values: '0+1x20'
+      - series: 'windows_logical_disk_reads_total{instance="10.0.0.5:9182",vm_name="win-ok",volume="C:"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BSODRisk_GuestDiskLatencyHigh
+        exp_alerts: []
+
+  # Positive: QGA service down
+  - interval: 1m
+    input_series:
+      - series: 'bsod_qga_service_running{vm_name="win-no-qga"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BSODRisk_QGAServiceDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: config
+              kcs: "7128506"
+              vm_name: win-no-qga
+            exp_annotations:
+              summary: "QEMU Guest Agent not running in Windows VM"
+              description: |
+                Windows VM win-no-qga reports QEMU Guest Agent (QEMU-GA) is not
+                running. Without QGA, graceful shutdown on node drain will fail, VSS
+                snapshots are unavailable, and the VM may experience dirty shutdowns that
+                present as BSODs. Remediate: start the QEMU-GA service and set to Automatic.
+              runbook_url: "https://access.redhat.com/solutions/7128506"
+              contact_first: "Red Hat"
+
+  # Negative: QGA service running
+  - interval: 1m
+    input_series:
+      - series: 'bsod_qga_service_running{vm_name="win-qga-ok"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BSODRisk_QGAServiceDown
+        exp_alerts: []
+
+  # Positive: Pagefile pressure high (usage > 90% of limit)
+  # windows_exporter's pagefile collector only emits free_bytes/limit_bytes;
+  # utilization is derived as (limit-free)/limit -- free=50000000 => 95% used.
+  - interval: 1m
+    input_series:
+      - series: 'windows_pagefile_free_bytes{vm_name="win-pf-full"}'
+        values: '50000000x20'
+      - series: 'windows_pagefile_limit_bytes{vm_name="win-pf-full"}'
+        values: '1000000000x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BSODRisk_PagefilePressure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: resource
+              kcs: "7132512"
+              vm_name: win-pf-full
+            exp_annotations:
+              summary: "Windows VM pagefile free space critically low"
+              description: |
+                Windows VM win-pf-full has pagefile utilization above 90%.
+                Under memory pressure with slow storage, this amplifies the risk of
+                MEMORY_MANAGEMENT (0x1A) BSODs when the system cannot page out fast enough.
+              runbook_url: "https://access.redhat.com/solutions/7132512"
+              contact_first: "Microsoft (if no recent platform changes)"
+              stop_codes: "0x1A"
+
+  # Negative: Pagefile pressure low (free=900000000 => 10% used)
+  - interval: 1m
+    input_series:
+      - series: 'windows_pagefile_free_bytes{vm_name="win-pf-ok"}'
+        values: '900000000x20'
+      - series: 'windows_pagefile_limit_bytes{vm_name="win-pf-ok"}'
+        values: '1000000000x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BSODRisk_PagefilePressure
+        exp_alerts: []
+
+  # Positive: Driver outdated via stream-aware gauge
+  - interval: 1m
+    input_series:
+      - series: 'bsod_virtio_driver_outdated{vm_name="win-old-drv",version="1.9.24",stream="el9_4"}'
+        values: '1x5'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: BSODRisk_DriverVersionOutdated
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: driver
+              kcs: "7141291"
+              vm_name: win-old-drv
+              version: "1.9.24"
+              stream: el9_4
+            exp_annotations:
+              summary: "Windows VM has outdated VirtIO driver version"
+              description: |
+                Windows VM win-old-drv reports VirtIO package version
+                1.9.24 as outdated for the cluster OCP stream.
+                Upgrade virtio-win per shared/virtio-win-thresholds.json (target often 1.9.57).
+                Confirm with Gate 15 after guest collection if needed.
+              runbook_url: "https://access.redhat.com/solutions/7141291"
+              contact_first: "Red Hat"
+
+  # Negative: stream-aware gauge reports current
+  - interval: 1m
+    input_series:
+      - series: 'bsod_virtio_driver_outdated{vm_name="win-good-drv",version="1.9.57",stream="el9_6"}'
+        values: '0x5'
+      - series: 'bsod_virtio_package_version{vm_name="win-good-drv",version="1.9.57"}'
+        values: '1x5'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: BSODRisk_DriverVersionOutdated
+        exp_alerts: []
+
+  # Positive fallback: legacy package metric only (no outdated gauge), below tooling floor
+  - interval: 1m
+    input_series:
+      - series: 'bsod_virtio_package_version{vm_name="win-legacy-old",version="1.9.24"}'
+        values: '1x5'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: BSODRisk_DriverVersionOutdated
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: driver
+              kcs: "7141291"
+              vm_name: win-legacy-old
+              version: "1.9.24"
+            exp_annotations:
+              summary: "Windows VM has outdated VirtIO driver version"
+              description: |
+                Windows VM win-legacy-old reports VirtIO package version
+                1.9.24 as outdated for the cluster OCP stream.
+                Upgrade virtio-win per shared/virtio-win-thresholds.json (target often 1.9.57).
+                Confirm with Gate 15 after guest collection if needed.
+              runbook_url: "https://access.redhat.com/solutions/7141291"
+              contact_first: "Red Hat"
+
+  # Positive: legacy collector fallback -- package_version present, outdated gauge absent
+  - interval: 1m
+    input_series:
+      - series: 'bsod_virtio_package_version{vm_name="win-legacy-old",version="1.9.24"}'
+        values: '1x5'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: BSODRisk_LegacyDriverCollectorFallback
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              bsod_domain: driver
+              kcs: "7141291"
+              vm_name: win-legacy-old
+              version: "1.9.24"
+            exp_annotations:
+              summary: "Windows VM's driver verdict is served by the legacy, non-stream-aware fallback"
+              description: |
+                Windows VM win-legacy-old reports bsod_virtio_package_version but not
+                bsod_virtio_driver_outdated, meaning BSODRisk_DriverVersionOutdated (if firing
+                or not) is using the legacy universal-floor fallback (~1.9.41) rather than the
+                stream-aware verdict. The fallback cannot distinguish RHEL streams (e.g. el8_6's
+                1.9.24 target vs. el9_6's 1.9.53 FAIL threshold) and may under- or over-report.
+                Upgrade this VM's guest collector to the current bsod-textfile-collector.ps1 to
+                get the stream-aware gauge, or confirm the driver stream verdict via Gate 15
+                after guest collection.
+              runbook_url: "https://access.redhat.com/solutions/7141291"
+              contact_first: "Red Hat"
+
+  # Negative: stream-aware gauge present -- not served by the legacy fallback
+  - interval: 1m
+    input_series:
+      - series: 'bsod_virtio_driver_outdated{vm_name="win-good-drv",version="1.9.57",stream="el9_6"}'
+        values: '0x5'
+      - series: 'bsod_virtio_package_version{vm_name="win-good-drv",version="1.9.57"}'
+        values: '1x5'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: BSODRisk_LegacyDriverCollectorFallback
+        exp_alerts: []
+
+  # Positive: CrashDump disabled
+  - interval: 1m
+    input_series:
+      - series: 'bsod_crashdump_enabled{vm_name="win-no-dump"}'
+        values: '0x5'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: BSODRisk_CrashDumpDisabled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: config
+              kcs: "7128506"
+              vm_name: win-no-dump
+            exp_annotations:
+              summary: "Windows VM crash dump collection disabled"
+              description: |
+                Windows VM win-no-dump has CrashDumpEnabled=0. If a BSOD occurs,
+                no memory dump will be generated, making root cause analysis impossible.
+                Set CrashDumpEnabled to 7 (Automatic) or 2 (Kernel dump).
+              runbook_url: "https://access.redhat.com/solutions/7128506"
+              contact_first: "Microsoft"
+
+  # Negative: CrashDump enabled (value 7 = Automatic)
+  - interval: 1m
+    input_series:
+      - series: 'bsod_crashdump_enabled{vm_name="win-dump-ok"}'
+        values: '7x5'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: BSODRisk_CrashDumpDisabled
+        exp_alerts: []
+
+  # --- Recording rules: denominator guard (zero IOPS must not emit NaN) ---
+  # Non-zero IOPS → finite avg_1h latency (60s / 2 ops = 30s)
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_storage_read_times_seconds_total{name="win-lat",namespace="test",drive="rootdisk",instance="a",pod="p1"}'
+        values: '0+60x70'
+      - series: 'kubevirt_vmi_storage_iops_read_total{name="win-lat",namespace="test",drive="rootdisk",instance="a",pod="p1"}'
+        values: '0+2x70'
+    promql_expr_test:
+      - expr: 'bsod:vmi_disk_latency:avg_1h{name="win-lat",namespace="test",drive="rootdisk"}'
+        eval_time: 65m
+        exp_samples:
+          - labels: 'bsod:vmi_disk_latency:avg_1h{drive="rootdisk",name="win-lat",namespace="test"}'
+            value: 30
+
+  # Zero IOPS (idle / cloud-init) → no series (guard drops NaN)
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_storage_read_times_seconds_total{name="win-idle",namespace="test",drive="cloudinitdisk",instance="a",pod="p1"}'
+        values: '0x70'
+      - series: 'kubevirt_vmi_storage_iops_read_total{name="win-idle",namespace="test",drive="cloudinitdisk",instance="a",pod="p1"}'
+        values: '0x70'
+    promql_expr_test:
+      - expr: 'bsod:vmi_disk_latency:avg_1h{name="win-idle",namespace="test",drive="cloudinitdisk"}'
+        eval_time: 65m
+        exp_samples: []
+
+  # Direct test for bsod:vmi_disk_latency:avg_24h (previously only exercised
+  # indirectly via BSODRisk_StorageLatencyTrending's ratio expression above --
+  # that proves the ratio math but never asserts avg_24h's own value/guard in
+  # isolation). Mirrors the avg_1h cases directly above: non-zero IOPS over a
+  # 24h window → finite avg (120s / 2 ops = 60s).
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_storage_read_times_seconds_total{name="win-lat-24h",namespace="test",drive="rootdisk",instance="a",pod="p1"}'
+        values: '0+120x1450'
+      - series: 'kubevirt_vmi_storage_iops_read_total{name="win-lat-24h",namespace="test",drive="rootdisk",instance="a",pod="p1"}'
+        values: '0+2x1450'
+    promql_expr_test:
+      - expr: 'bsod:vmi_disk_latency:avg_24h{name="win-lat-24h",namespace="test",drive="rootdisk"}'
+        eval_time: 1445m
+        exp_samples:
+          - labels: 'bsod:vmi_disk_latency:avg_24h{drive="rootdisk",name="win-lat-24h",namespace="test"}'
+            value: 60
+
+  # Zero IOPS over the 24h window (idle disk) → no series (guard drops NaN),
+  # same denominator guard as avg_1h but exercised at the 24h range.
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_storage_read_times_seconds_total{name="win-idle-24h",namespace="test",drive="cloudinitdisk",instance="a",pod="p1"}'
+        values: '0x1450'
+      - series: 'kubevirt_vmi_storage_iops_read_total{name="win-idle-24h",namespace="test",drive="cloudinitdisk",instance="a",pod="p1"}'
+        values: '0x1450'
+    promql_expr_test:
+      - expr: 'bsod:vmi_disk_latency:avg_24h{name="win-idle-24h",namespace="test",drive="cloudinitdisk"}'
+        eval_time: 1445m
+        exp_samples: []
+
+  # --- F-01: WRITE-PATH recording rules and the worst-direction union ---
+  #
+  # Until v0.26.0 every storage-latency signal derived only from the READ
+  # counters, so a VM whose writes had collapsed while reads stayed nominal --
+  # the normal shape of an ODF/Ceph recovery, where a read needs one OSD and a
+  # write needs every replica -- produced NO alert at all. These cases pin both
+  # halves of the fix: the write twins compute, and the union prefers the worse
+  # direction without dropping a disk that only does I/O one way.
+
+  # Write twin, non-zero IOPS -> finite avg_1h (140s / 2 ops = 70s)
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_storage_write_times_seconds_total{name="win-w",namespace="test",drive="rootdisk",instance="a",pod="p1"}'
+        values: '0+140x70'
+      - series: 'kubevirt_vmi_storage_iops_write_total{name="win-w",namespace="test",drive="rootdisk",instance="a",pod="p1"}'
+        values: '0+2x70'
+    promql_expr_test:
+      - expr: 'bsod:vmi_disk_write_latency:avg_1h{name="win-w",namespace="test",drive="rootdisk"}'
+        eval_time: 65m
+        exp_samples:
+          - labels: 'bsod:vmi_disk_write_latency:avg_1h{drive="rootdisk",name="win-w",namespace="test"}'
+            value: 70
+
+  # Write twin, zero write IOPS (read-only disk) -> no series, same denominator
+  # guard as the read rules
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_storage_write_times_seconds_total{name="win-ro",namespace="test",drive="cd",instance="a",pod="p1"}'
+        values: '0x70'
+      - series: 'kubevirt_vmi_storage_iops_write_total{name="win-ro",namespace="test",drive="cd",instance="a",pod="p1"}'
+        values: '0x70'
+    promql_expr_test:
+      - expr: 'bsod:vmi_disk_write_latency:avg_1h{name="win-ro",namespace="test",drive="cd"}'
+        eval_time: 65m
+        exp_samples: []
+
+  # Write twin at the 24h range (280s / 2 ops = 140s)
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_storage_write_times_seconds_total{name="win-w24",namespace="test",drive="rootdisk",instance="a",pod="p1"}'
+        values: '0+120x1450'
+      - series: 'kubevirt_vmi_storage_iops_write_total{name="win-w24",namespace="test",drive="rootdisk",instance="a",pod="p1"}'
+        values: '0+2x1450'
+    promql_expr_test:
+      - expr: 'bsod:vmi_disk_write_latency:avg_24h{name="win-w24",namespace="test",drive="rootdisk"}'
+        eval_time: 1445m
+        exp_samples:
+          - labels: 'bsod:vmi_disk_write_latency:avg_24h{drive="rootdisk",name="win-w24",namespace="test"}'
+            value: 60
+
+  # THE F-01 CASE: reads nominal (2s/2ops = 1s), writes collapsed
+  # (140s/2ops = 70s). worst_1h must report the WRITE value. Before the fix the
+  # alerts read avg_1h only and would have seen 1s -- comfortably under every
+  # threshold -- while the guest was 70s/op from its pagefile.
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_storage_read_times_seconds_total{name="win-wdom",namespace="test",drive="rootdisk",instance="a",pod="p1"}'
+        values: '0+2x70'
+      - series: 'kubevirt_vmi_storage_iops_read_total{name="win-wdom",namespace="test",drive="rootdisk",instance="a",pod="p1"}'
+        values: '0+2x70'
+      - series: 'kubevirt_vmi_storage_write_times_seconds_total{name="win-wdom",namespace="test",drive="rootdisk",instance="a",pod="p1"}'
+        values: '0+140x70'
+      - series: 'kubevirt_vmi_storage_iops_write_total{name="win-wdom",namespace="test",drive="rootdisk",instance="a",pod="p1"}'
+        values: '0+2x70'
+    promql_expr_test:
+      - expr: 'bsod:vmi_disk_latency:avg_1h{name="win-wdom",namespace="test",drive="rootdisk"}'
+        eval_time: 65m
+        exp_samples:
+          - labels: 'bsod:vmi_disk_latency:avg_1h{drive="rootdisk",name="win-wdom",namespace="test"}'
+            value: 1
+      - expr: 'bsod:vmi_disk_latency:worst_1h{name="win-wdom",namespace="test",drive="rootdisk"}'
+        eval_time: 65m
+        exp_samples:
+          - labels: 'bsod:vmi_disk_latency:worst_1h{drive="rootdisk",name="win-wdom",namespace="test"}'
+            value: 70
+
+  # Union must not DROP a one-sided disk. `(a >= b) or b` would have lost the
+  # read-only disk entirely; label_replace + max by() keeps it.
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_storage_read_times_seconds_total{name="win-readonly",namespace="test",drive="cd",instance="a",pod="p1"}'
+        values: '0+60x70'
+      - series: 'kubevirt_vmi_storage_iops_read_total{name="win-readonly",namespace="test",drive="cd",instance="a",pod="p1"}'
+        values: '0+2x70'
+    promql_expr_test:
+      - expr: 'bsod:vmi_disk_latency:worst_1h{name="win-readonly",namespace="test",drive="cd"}'
+        eval_time: 65m
+        exp_samples:
+          - labels: 'bsod:vmi_disk_latency:worst_1h{drive="cd",name="win-readonly",namespace="test"}'
+            value: 30
+
+  # ...and the mirror case: a write-only disk survives too.
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_storage_write_times_seconds_total{name="win-writeonly",namespace="test",drive="d",instance="a",pod="p1"}'
+        values: '0+14x70'
+      - series: 'kubevirt_vmi_storage_iops_write_total{name="win-writeonly",namespace="test",drive="d",instance="a",pod="p1"}'
+        values: '0+2x70'
+    promql_expr_test:
+      - expr: 'bsod:vmi_disk_latency:worst_1h{name="win-writeonly",namespace="test",drive="d"}'
+        eval_time: 65m
+        exp_samples:
+          - labels: 'bsod:vmi_disk_latency:worst_1h{drive="d",name="win-writeonly",namespace="test"}'
+            value: 7
+
+  # END-TO-END F-01 PROOF: the same write-dominant VM must now raise
+  # BSODRisk_StorageLatencyHigh. This assertion FAILS on the pre-v0.26.0
+  # expression (`bsod:vmi_disk_latency:avg_1h >= 1`), which saw only the 1s
+  # read mean. It is the regression test for the whole finding.
+  - interval: 1m
+    input_series:
+      - series: 'kubevirt_vmi_storage_read_times_seconds_total{name="win-wdom2",namespace="test",drive="rootdisk",instance="a",pod="p1"}'
+        values: '0+2x100'
+      - series: 'kubevirt_vmi_storage_iops_read_total{name="win-wdom2",namespace="test",drive="rootdisk",instance="a",pod="p1"}'
+        values: '0+2x100'
+      - series: 'kubevirt_vmi_storage_write_times_seconds_total{name="win-wdom2",namespace="test",drive="rootdisk",instance="a",pod="p1"}'
+        values: '0+140x100'
+      - series: 'kubevirt_vmi_storage_iops_write_total{name="win-wdom2",namespace="test",drive="rootdisk",instance="a",pod="p1"}'
+        values: '0+2x100'
+    alert_rule_test:
+      - eval_time: 80m
+        alertname: BSODRisk_StorageLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              bsod_domain: storage
+              kcs: "7132512"
+              name: win-wdom2
+              namespace: test
+              drive: rootdisk
+            exp_annotations:
+              summary: "VM disk I/O latency severely degraded -- BSOD risk"
+              description: |
+                VM win-wdom2 in namespace test has averaged
+                70s per disk I/O over the last hour on its WORST
+                direction (read or write), at or above the 1.0s severe-degradation threshold. Individual I/Os in this regime routinely
+                exceed the 60s VirtIO IoTimeoutValue, triggering MEMORY_MANAGEMENT (0x1A) or
+                KERNEL_DATA_INPAGE_ERROR (0x7A) BSODs.
+              runbook_url: "https://access.redhat.com/solutions/7132512"
+              contact_first: "Red Hat (if recent platform change) / Microsoft (if no changes)"
+              stop_codes: "0x1A, 0x7A, 0x50, 0xEF"
+              calibration_status: |
+                This threshold (1.0s, shared/storage-latency-thresholds.json) was adopted by
+                operator decision on 2026-07-28, replacing a defective 30s/op mean that could
+                only fire after a Windows guest had already bugchecked. Calibration is PARTIAL
+                (measured 2026-07-29 on a test/workshop cluster) -- see _calibration_status in
+                shared/storage-latency-thresholds.json for what that measurement does and does
+                not establish. If this alert fires or is persistently noisy/quiet for your
+                storage backend, see the "Storage latency calibration" section in
+                docs/admin-runbook.md before treating the threshold itself as ground truth.
+
+  # --- Proxy alert: BSODRisk_GuestUnexpectedRestart ---
+  # v0.17.0 (F1): all cases now also carry
+  # kubevirt_vm_running_status_last_transition_timestamp_seconds, the phase-change guard
+  # that replaced the roadmap's unusable kubevirt_vmi_phase_count design (see the alert
+  # file's comment for why). Because promtool unit tests run on a fake clock starting at
+  # time()==0 (see docs/configuration/unit_testing_rules.md), "recent" and "long ago" are
+  # expressed as small vs. large elapsed fake-seconds from that epoch, not real epoch
+  # timestamps.
+
+  # Positive: up=0, kubevirt_vmi_info exists, AND the VM genuinely re-entered Running
+  # recently (transition at t=150s; evaluated at eval_time=5m/300s -> 150s elapsed, < 600s)
+  - interval: 1m
+    input_series:
+      - series: 'up{job="bsod-windows-exporter",vm_name="win-crashed",namespace="test",instance="10.0.0.5:9182"}'
+        values: '1 1 0 0 0 0 0 0 0 0'
+      - series: 'kubevirt_vmi_info{name="win-crashed",namespace="test",os="windows"}'
+        values: '1x10'
+      - series: 'kubevirt_vm_running_status_last_transition_timestamp_seconds{name="win-crashed",namespace="test"}'
+        values: '0 0 150x8'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BSODRisk_GuestUnexpectedRestart
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: crash
+              kcs: "7141291"
+              vm_name: win-crashed
+              name: win-crashed
+              namespace: test
+              job: bsod-windows-exporter
+              instance: "10.0.0.5:9182"
+            exp_annotations:
+              summary: "Windows VM restarted unexpectedly -- possible BSOD"
+              description: |
+                Windows VM win-crashed: windows_exporter target is down while the
+                VMI still exists in KubeVirt and the VM re-entered Running within the last
+                10 minutes, indicating a guest-level crash or unexpected reboot (BSOD on
+                Windows). Collect crash dump and run:
+                  cnv-win-bsod-audit.sh <namespace> <vm-name>
+                If crash dump exists, open a support case with the gate report and dump.
+              runbook_url: "https://access.redhat.com/solutions/7141291"
+              contact_first: "Red Hat (if recent platform/driver change) / Microsoft (if no changes)"
+              stop_codes: "varies (check Windows minidump or virt-launcher logs)"
+
+  # Negative: up=1 (exporter healthy) -- should not fire
+  - interval: 1m
+    input_series:
+      - series: 'up{job="bsod-windows-exporter",vm_name="win-healthy",namespace="test",instance="10.0.0.5:9182"}'
+        values: '1x10'
+      - series: 'kubevirt_vmi_info{name="win-healthy",namespace="test",os="windows"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BSODRisk_GuestUnexpectedRestart
+        exp_alerts: []
+
+  # Negative: up=0 but VMI absent (VM intentionally stopped) -- should not fire
+  - interval: 1m
+    input_series:
+      - series: 'up{job="bsod-windows-exporter",vm_name="win-stopped",namespace="test",instance="10.0.0.5:9182"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BSODRisk_GuestUnexpectedRestart
+        exp_alerts: []
+
+  # Negative (F1 regression guard): up=0 continuously for 15m and VMI exists, but the VM's
+  # last real transition to Running was at t=0 -- by eval_time=15m/900s, 900s have elapsed
+  # since that transition (>= 600s), so this is a merely-unreachable exporter (firewall,
+  # service stopped, etc.), NOT a genuine crash/restart. This is exactly the false-positive
+  # pattern the deep-dive review found firing on 17/21 live-cluster VMs -- must not fire.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="bsod-windows-exporter",vm_name="win-unreachable",namespace="test",instance="10.0.0.9:9182"}'
+        values: '0x16'
+      - series: 'kubevirt_vmi_info{name="win-unreachable",namespace="test",os="windows"}'
+        values: '1x16'
+      - series: 'kubevirt_vm_running_status_last_transition_timestamp_seconds{name="win-unreachable",namespace="test"}'
+        values: '0x16'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BSODRisk_GuestUnexpectedRestart
+        exp_alerts: []
+
+  # Positive: per-VM job name (regex match) -- exporter down, VMI running, VM re-entered
+  # Running recently (transition at t=150s; evaluated at eval_time=5m/300s -> 150s < 600s)
+  - interval: 1m
+    input_series:
+      - series: 'up{job="bsod-windows-exporter-win2k22-prod",vm_name="win2k22-prod",namespace="prod",instance="10.0.1.5:9182"}'
+        values: '1 1 0 0 0 0 0 0 0 0'
+      - series: 'kubevirt_vmi_info{name="win2k22-prod",namespace="prod",os="windows"}'
+        values: '1x10'
+      - series: 'kubevirt_vm_running_status_last_transition_timestamp_seconds{name="win2k22-prod",namespace="prod"}'
+        values: '0 0 150x8'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BSODRisk_GuestUnexpectedRestart
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: crash
+              kcs: "7141291"
+              vm_name: win2k22-prod
+              name: win2k22-prod
+              namespace: prod
+              job: bsod-windows-exporter-win2k22-prod
+              instance: "10.0.1.5:9182"
+            exp_annotations:
+              summary: "Windows VM restarted unexpectedly -- possible BSOD"
+              description: |
+                Windows VM win2k22-prod: windows_exporter target is down while the
+                VMI still exists in KubeVirt and the VM re-entered Running within the last
+                10 minutes, indicating a guest-level crash or unexpected reboot (BSOD on
+                Windows). Collect crash dump and run:
+                  cnv-win-bsod-audit.sh <namespace> <vm-name>
+                If crash dump exists, open a support case with the gate report and dump.
+              runbook_url: "https://access.redhat.com/solutions/7141291"
+              contact_first: "Red Hat (if recent platform/driver change) / Microsoft (if no changes)"
+              stop_codes: "varies (check Windows minidump or virt-launcher logs)"
+
+  # --- Recording rule: bsod:vm_risk_factor_count:gauge ---
+
+  # All three risk factors active: driver outdated + low timeout + no crashdump
+  - interval: 1m
+    input_series:
+      - series: 'bsod_virtio_driver_outdated{vm_name="win-risky",version="1.9.24",stream="el9_4"}'
+        values: '1x10'
+      - series: 'bsod_io_timeout_value{vm_name="win-risky",driver="viostor"}'
+        values: '60x10'
+      - series: 'bsod_crashdump_enabled{vm_name="win-risky"}'
+        values: '0x10'
+    promql_expr_test:
+      - expr: 'bsod:vm_risk_factor_count:gauge{vm_name="win-risky"}'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'bsod:vm_risk_factor_count:gauge{vm_name="win-risky"}'
+            value: 3
+
+  # Zero risk factors: driver current + high timeout + crashdump enabled
+  - interval: 1m
+    input_series:
+      - series: 'bsod_virtio_driver_outdated{vm_name="win-safe",version="1.9.57",stream="el9_6"}'
+        values: '0x10'
+      - series: 'bsod_io_timeout_value{vm_name="win-safe",driver="viostor"}'
+        values: '120x10'
+      - series: 'bsod_crashdump_enabled{vm_name="win-safe"}'
+        values: '7x10'
+    promql_expr_test:
+      - expr: 'bsod:vm_risk_factor_count:gauge{vm_name="win-safe"}'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'bsod:vm_risk_factor_count:gauge{vm_name="win-safe"}'
+            value: 0
+
+  # Partial risk: only driver outdated (other factors ok)
+  - interval: 1m
+    input_series:
+      - series: 'bsod_virtio_driver_outdated{vm_name="win-partial",version="1.9.40",stream="el9_4"}'
+        values: '1x10'
+      - series: 'bsod_io_timeout_value{vm_name="win-partial",driver="viostor"}'
+        values: '120x10'
+      - series: 'bsod_crashdump_enabled{vm_name="win-partial"}'
+        values: '7x10'
+    promql_expr_test:
+      - expr: 'bsod:vm_risk_factor_count:gauge{vm_name="win-partial"}'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'bsod:vm_risk_factor_count:gauge{vm_name="win-partial"}'
+            value: 1
+
+  # --- Recording rule expr tests: bsod:cluster_cpu_model_count:gauge (R-9) ---
+
+  # REGRESSION GUARD (R-9): all-AMD cluster with two GENERATIONS. This is the
+  # exact shape of the live OCP 4.21.10 validation cluster (EPYC-Rome +
+  # EPYC-Milan x2, 2 distinct feature sets). The previous vendor-counting
+  # expression returned 1 here, so BSODRisk_HeterogeneousCPUMigration could
+  # never fire despite a real Rome<->Milan migration risk (0x101 / 0x9C).
+  - interval: 1m
+    input_series:
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true",label_cpu_feature_node_kubevirt_io_pcid="true",label_cpu_feature_node_kubevirt_io_invpcid="true",label_cpu_feature_node_kubevirt_io_amd_psfd="true",node="milan-1"}'
+        values: '1x10'
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true",label_cpu_feature_node_kubevirt_io_pcid="true",label_cpu_feature_node_kubevirt_io_invpcid="true",label_cpu_feature_node_kubevirt_io_amd_psfd="true",node="milan-2"}'
+        values: '1x10'
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true",node="rome-1"}'
+        values: '1x10'
+    promql_expr_test:
+      - expr: 'bsod:cluster_cpu_model_count:gauge'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'bsod:cluster_cpu_model_count:gauge{}'
+            value: 2
+
+  # Non-KubeVirt nodes (masters/infra with no cpu-vendor label) must NOT form a
+  # spurious "empty signature" group and inflate the count.
+  - interval: 1m
+    input_series:
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true",label_cpu_feature_node_kubevirt_io_amd_psfd="true",node="worker-1"}'
+        values: '1x10'
+      - series: 'kube_node_labels{node="master-1"}'
+        values: '1x10'
+      - series: 'kube_node_labels{node="master-2"}'
+        values: '1x10'
+    promql_expr_test:
+      - expr: 'bsod:cluster_cpu_model_count:gauge'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'bsod:cluster_cpu_model_count:gauge{}'
+            value: 1
+
+
+  # Heterogeneous cluster: both AMD and Intel vendor labels present on
+  # different nodes -> recording rule should return 2.
+  - interval: 1m
+    input_series:
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_amd="true",label_cpu_feature_node_kubevirt_io_amd_psfd="true",node="amd-worker-1"}'
+        values: '1x10'
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_intel="true",label_cpu_feature_node_kubevirt_io_pku="true",node="intel-worker-1"}'
+        values: '1x10'
+    promql_expr_test:
+      - expr: 'bsod:cluster_cpu_model_count:gauge'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'bsod:cluster_cpu_model_count:gauge{}'
+            value: 2
+
+  # Homogeneous cluster: only Intel vendor labels on all nodes -> count = 1
+  # (one distinct vendor group present).
+  - interval: 1m
+    input_series:
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_intel="true",label_cpu_feature_node_kubevirt_io_pku="true",node="intel-worker-1"}'
+        values: '1x10'
+      - series: 'kube_node_labels{label_cpu_vendor_node_kubevirt_io_intel="true",label_cpu_feature_node_kubevirt_io_pku="true",node="intel-worker-2"}'
+        values: '1x10'
+    promql_expr_test:
+      - expr: 'bsod:cluster_cpu_model_count:gauge'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'bsod:cluster_cpu_model_count:gauge{}'
+            value: 1
+
+  # No CPU vendor labels at all (pre-OCP 4.14 without allowlist) -> fallback
+  # vector(0) returns 0.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prometheus"}'
+        values: '1x10'
+    promql_expr_test:
+      - expr: 'bsod:cluster_cpu_model_count:gauge'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'bsod:cluster_cpu_model_count:gauge{}'
+            value: 0
+
+  # --- Recording rule expr tests: bsod:cluster_risk_summary:gauge (R-10) ---
+
+  # Two VMs with risk factors: sum should be 3+1=4.
+  - interval: 1m
+    input_series:
+      - series: 'bsod_virtio_driver_outdated{vm_name="win-old"}'
+        values: '1x10'
+      - series: 'bsod_io_timeout_value{vm_name="win-old"}'
+        values: '60x10'
+      - series: 'bsod_crashdump_enabled{vm_name="win-old"}'
+        values: '0x10'
+      - series: 'bsod_virtio_driver_outdated{vm_name="win-new"}'
+        values: '0x10'
+      - series: 'bsod_io_timeout_value{vm_name="win-new"}'
+        values: '60x10'
+      - series: 'bsod_crashdump_enabled{vm_name="win-new"}'
+        values: '7x10'
+    promql_expr_test:
+      - expr: 'bsod:cluster_risk_summary:gauge'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'bsod:cluster_risk_summary:gauge{}'
+            value: 4
+
+  # --- Recording rule expr tests: bsod:cluster_driver_compliance:ratio (R-10) ---
+
+  # 1 outdated + 1 compliant = 50% compliance -> ratio = 0.5.
+  - interval: 1m
+    input_series:
+      - series: 'bsod_virtio_driver_outdated{vm_name="win-old"}'
+        values: '1x10'
+      - series: 'bsod_virtio_driver_outdated{vm_name="win-new"}'
+        values: '0x10'
+    promql_expr_test:
+      - expr: 'bsod:cluster_driver_compliance:ratio'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'bsod:cluster_driver_compliance:ratio{}'
+            value: 0.5
+
+  # All compliant = 100% -> ratio = 1.0.
+  - interval: 1m
+    input_series:
+      - series: 'bsod_virtio_driver_outdated{vm_name="win-a"}'
+        values: '0x10'
+      - series: 'bsod_virtio_driver_outdated{vm_name="win-b"}'
+        values: '0x10'
+    promql_expr_test:
+      - expr: 'bsod:cluster_driver_compliance:ratio'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'bsod:cluster_driver_compliance:ratio{}'
+            value: 1
+
+  # R-39 / N-03: ZERO instrumented VMs must produce NO SERIES, not a fabricated
+  # 1.0. The rule used to end in `or vector(1)`, so a cluster where the textfile
+  # collector had never been deployed reported perfect driver compliance -- the
+  # single most misleading value this metric can take, on precisely the clusters
+  # least entitled to it. An empty vector is Prometheus's way of saying "nothing
+  # has been assessed"; consumers render it via `noValue`, not as 100%.
+  #
+  # An unrelated series is fed so the test has a populated TSDB and the empty
+  # result provably comes from the rule, not from an empty database.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="unrelated"}'
+        values: '1x10'
+    promql_expr_test:
+      - expr: 'bsod:cluster_driver_compliance:ratio'
+        eval_time: 6m
+        exp_samples: []
+
+  # --- BSODRisk_VirtLauncherCPUThrottled (R-45/N-07, renamed under F-02) ---
+  #
+  # This is the CFS rule that shipped as BSODRisk_HostCPUContention. Renamed in
+  # v0.26.0 to what it measures: a pod capped by its OWN CPU limit.
+
+  # Positive: 30% of CFS periods throttled, sustained past the 10m `for:`
+  # window -- above the 25% shared/host-contention-thresholds.json threshold.
+  - interval: 1m
+    input_series:
+      - series: 'container_cpu_cfs_periods_total{pod="virt-launcher-win-cpu-test-abcde",node="worker-0"}'
+        values: '0+100x20'
+      - series: 'container_cpu_cfs_throttled_periods_total{pod="virt-launcher-win-cpu-test-abcde",node="worker-0"}'
+        values: '0+30x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BSODRisk_VirtLauncherCPUThrottled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: cpu
+              kcs: "7132511"
+              node: worker-0
+            exp_annotations:
+              summary: "virt-launcher pod(s) on this node are being throttled by their own CPU limit"
+              description: |
+                Node worker-0 shows sustained CFS CPU throttling on
+                virt-launcher pods: 30% of
+                scheduling periods were throttled over the last 5 minutes, at or
+                above the 25% threshold. This means those pods are hitting their
+                CONFIGURED CPU LIMIT -- it is not a measure of node-level
+                contention (see BSODRisk_HostCPUContention for that). Windows
+                guests are far more sensitive to scheduling jitter than Linux
+                guests, so sustained throttling can still trigger
+                CLOCK_WATCHDOG_TIMEOUT (0x101) or MACHINE_CHECK_EXCEPTION (0x9C).
+                Action: raise or remove the CPU limit on the affected VMs, or
+                reduce their vCPU demand.
+              runbook_url: "https://access.redhat.com/solutions/7132511"
+              contact_first: "Red Hat (if recent scheduling/density change) / Microsoft (if no changes)"
+              stop_codes: "0x101, 0x9C"
+              prerequisite: |
+                Only produces series for virt-launcher pods that have a CPU LIMIT
+                set (resources.limits.cpu, or dedicatedCpuPlacement). KubeVirt
+                sets requests but not limits by default, so on a stock cluster
+                this alert is correctly silent -- there is no quota to exceed.
+                That is a real limitation, not a bug: see
+                shared/alert-liveness.json.
+              calibration_status: |
+                This threshold (25% throttle ratio, shared/host-contention-thresholds.json)
+                is UNCALIBRATED -- adopted as a starting point pending a live
+                induced-contention validation run (constrain a virt-launcher
+                pod's CPU limit below its demand and confirm the alert fires and
+                clears). See _calibration_status in
+                shared/host-contention-thresholds.json for what remains
+                unestablished, and docs/admin-runbook.md's "Storage latency
+                calibration" section for the calibration workflow this alert
+                will follow once a live run is completed.
+
+  # Negative: 5% throttled -- healthy, must never fire.
+  - interval: 1m
+    input_series:
+      - series: 'container_cpu_cfs_periods_total{pod="virt-launcher-win-cpu-ok-abcde",node="worker-1"}'
+        values: '0+100x20'
+      - series: 'container_cpu_cfs_throttled_periods_total{pod="virt-launcher-win-cpu-ok-abcde",node="worker-1"}'
+        values: '0+5x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BSODRisk_VirtLauncherCPUThrottled
+        exp_alerts: []
+
+  # Negative: a non-virt-launcher pod throttled at 90% must not fire --
+  # pod=~"virt-launcher-.*" scopes this alert to VM workloads only.
+  - interval: 1m
+    input_series:
+      - series: 'container_cpu_cfs_periods_total{pod="some-other-workload-abcde",node="worker-2"}'
+        values: '0+100x20'
+      - series: 'container_cpu_cfs_throttled_periods_total{pod="some-other-workload-abcde",node="worker-2"}'
+        values: '0+90x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BSODRisk_VirtLauncherCPUThrottled
+        exp_alerts: []
+
+  # F-02 CHARACTERISATION: a fully contended node with NO CPU limit set.
+  # cAdvisor reports flat-zero CFS counters because there is no bandwidth
+  # quota, so the ratio is 0/0 -> NaN and this alert stays silent. That is the
+  # documented, correct behaviour for a THROTTLING alert -- nothing is being
+  # throttled -- and it is exactly why this rule must not be called
+  # "HostCPUContention". The PSI alert below is what covers this case.
+  - interval: 1m
+    input_series:
+      - series: 'container_cpu_cfs_periods_total{pod="virt-launcher-win-nolimit-abcde",node="worker-3"}'
+        values: '0+0x30'
+      - series: 'container_cpu_cfs_throttled_periods_total{pod="virt-launcher-win-nolimit-abcde",node="worker-3"}'
+        values: '0+0x30'
+      # The same node, genuinely contended: an average of 3 tasks queued per
+      # CPU. No CPU limit exists anywhere in this scenario.
+      - series: 'node_schedstat_waiting_seconds_total{instance="worker-3",cpu="0"}'
+        values: '0+180x30'
+      - series: 'kube_node_labels{node="worker-3",label_cpu_vendor_node_kubevirt_io_intel="true"}'
+        values: '1x30'
+    alert_rule_test:
+      # The throttling alert is silent -- correctly, nothing is being throttled.
+      - eval_time: 20m
+        alertname: BSODRisk_VirtLauncherCPUThrottled
+        exp_alerts: []
+      # ...but the contention is real and IS now reported. This pair is the
+      # F-02 regression proof: before v0.26.0 the CFS rule was the only signal
+      # and carried the name "HostCPUContention", so this exact scenario -- a
+      # saturated node running default-configured VMs -- produced total
+      # silence. Asserting on the alert NAME here is deliberate: it fails if
+      # anyone points that name back at a limit-dependent metric.
+      - eval_time: 20m
+        alertname: BSODRisk_HostCPUContention
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: cpu
+              kcs: "7132511"
+              instance: worker-3
+            exp_annotations:
+              summary: "Node-level CPU contention -- runnable tasks are waiting for CPU"
+              description: |
+                KubeVirt node worker-3 averaged 3
+                tasks queued per CPU over the last 5 minutes (run-queue wait time
+                from /proc/schedstat), at or above the threshold of 1. Windows VMs
+                on this node may experience scheduling delays severe enough to
+                trigger CLOCK_WATCHDOG_TIMEOUT (0x101) or MACHINE_CHECK_EXCEPTION
+                (0x9C). Investigate node-level CPU overcommit: reduce VM density
+                on this node, or raise CPU requests so the scheduler stops packing
+                it.
+                Unlike BSODRisk_VirtLauncherCPUThrottled, this fires on real
+                contention even when no CPU limits are set -- which is the default
+                KubeVirt configuration, and the case that alert cannot see.
+              runbook_url: "https://access.redhat.com/solutions/7132511"
+              contact_first: "Red Hat (if recent scheduling/density change) / Microsoft (if no changes)"
+              stop_codes: "0x101, 0x9C"
+              prerequisite: |
+                Requires node_exporter (present in OCP's default monitoring stack)
+                and kube-state-metrics exposing KubeVirt node labels (the OCP
+                4.14+ nodes=[*] default). Both confirmed present on OCP 4.18.26 /
+                CNV 4.18.45.
+                NOTE: this alert originally used Linux PSI
+                (node_pressure_cpu_waiting_seconds_total), which is ABSENT on that
+                cluster -- no node_pressure_* series exist at all. If you are
+                adapting this rule, do not assume PSI is available just because
+                node_exporter is running. Verify a signal exists before relying on
+                it:
+                  oc get route -n openshift-monitoring thanos-querier
+                  curl -H "Authorization: Bearer $(oc whoami -t)" \
+                    --data-urlencode 'query=count(node_schedstat_waiting_seconds_total)' \
+                    https://<thanos-host>/api/v1/query
+              calibration_status: |
+                PARTIAL (2026-08-19). A real baseline WAS measured: over 24h on a
+                live OCP 4.18.26 / CNV 4.18.45 cluster the KubeVirt worker nodes
+                ran p50 0.0589, p95 0.243, p99 0.305, max 0.431 -- so the 1.0
+                threshold sits 2.3x above the observed peak and the nodes spent 0%
+                of the window above it. That establishes the threshold does not
+                FALSE-POSITIVE on a lightly-loaded cluster.
+                It does NOT establish that 1.0 CATCHES contention severe enough to
+                bugcheck a Windows guest -- that needs an induced-contention run,
+                which has not been done. Nor is a near-idle cluster (its VMs were
+                not running) representative of production density. Treat a firing
+                instance as a prompt to investigate, not a measured verdict. See
+                _calibration_status in shared/host-contention-thresholds.json.
+
+  # --- BSODRisk_HostCPUContention (run-queue based, F-02) ---
+  #
+  # Originally implemented on Linux PSI; PSI proved ABSENT on the live
+  # validation cluster (OCP 4.18.26 / ARO -- zero node_pressure_* series with
+  # node_exporter healthy), which would have reproduced F-02 exactly. Rebased
+  # onto /proc/schedstat run-queue wait, confirmed present there.
+  #
+  # NOTE the units: schedstat is aggregate task-wait seconds per second, per
+  # CPU -- unbounded above, not a 0-1 stall fraction. avg by (instance) reads
+  # as "tasks queued per CPU". 180s over a 60s step across 1 CPU = 3.
+
+  # Positive: 3 tasks queued per CPU on a KubeVirt-labelled node, sustained
+  # past the 10m `for:` window.
+  - interval: 1m
+    input_series:
+      - series: 'node_schedstat_waiting_seconds_total{instance="worker-kv",cpu="0"}'
+        values: '0+180x30'
+      - series: 'kube_node_labels{node="worker-kv",label_cpu_vendor_node_kubevirt_io_intel="true"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BSODRisk_HostCPUContention
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: cpu
+              kcs: "7132511"
+              instance: worker-kv
+            exp_annotations:
+              summary: "Node-level CPU contention -- runnable tasks are waiting for CPU"
+              description: |
+                KubeVirt node worker-kv averaged 3
+                tasks queued per CPU over the last 5 minutes (run-queue wait time
+                from /proc/schedstat), at or above the threshold of 1. Windows VMs
+                on this node may experience scheduling delays severe enough to
+                trigger CLOCK_WATCHDOG_TIMEOUT (0x101) or MACHINE_CHECK_EXCEPTION
+                (0x9C). Investigate node-level CPU overcommit: reduce VM density
+                on this node, or raise CPU requests so the scheduler stops packing
+                it.
+                Unlike BSODRisk_VirtLauncherCPUThrottled, this fires on real
+                contention even when no CPU limits are set -- which is the default
+                KubeVirt configuration, and the case that alert cannot see.
+              runbook_url: "https://access.redhat.com/solutions/7132511"
+              contact_first: "Red Hat (if recent scheduling/density change) / Microsoft (if no changes)"
+              stop_codes: "0x101, 0x9C"
+              prerequisite: |
+                Requires node_exporter (present in OCP's default monitoring stack)
+                and kube-state-metrics exposing KubeVirt node labels (the OCP
+                4.14+ nodes=[*] default). Both confirmed present on OCP 4.18.26 /
+                CNV 4.18.45.
+                NOTE: this alert originally used Linux PSI
+                (node_pressure_cpu_waiting_seconds_total), which is ABSENT on that
+                cluster -- no node_pressure_* series exist at all. If you are
+                adapting this rule, do not assume PSI is available just because
+                node_exporter is running. Verify a signal exists before relying on
+                it:
+                  oc get route -n openshift-monitoring thanos-querier
+                  curl -H "Authorization: Bearer $(oc whoami -t)" \
+                    --data-urlencode 'query=count(node_schedstat_waiting_seconds_total)' \
+                    https://<thanos-host>/api/v1/query
+              calibration_status: |
+                PARTIAL (2026-08-19). A real baseline WAS measured: over 24h on a
+                live OCP 4.18.26 / CNV 4.18.45 cluster the KubeVirt worker nodes
+                ran p50 0.0589, p95 0.243, p99 0.305, max 0.431 -- so the 1.0
+                threshold sits 2.3x above the observed peak and the nodes spent 0%
+                of the window above it. That establishes the threshold does not
+                FALSE-POSITIVE on a lightly-loaded cluster.
+                It does NOT establish that 1.0 CATCHES contention severe enough to
+                bugcheck a Windows guest -- that needs an induced-contention run,
+                which has not been done. Nor is a near-idle cluster (its VMs were
+                not running) representative of production density. Treat a firing
+                instance as a prompt to investigate, not a measured verdict. See
+                _calibration_status in shared/host-contention-thresholds.json.
+
+  # Negative: 0.4 tasks queued per CPU -- ABOVE the measured p99 (0.305) of the
+  # live cluster but below the 1.0 threshold. This is the case a naive
+  # carry-over of PSI's 0.25 would have alerted on, 4.9% of every day.
+  - interval: 1m
+    input_series:
+      - series: 'node_schedstat_waiting_seconds_total{instance="worker-busy",cpu="0"}'
+        values: '0+24x30'
+      - series: 'kube_node_labels{node="worker-busy",label_cpu_vendor_node_kubevirt_io_intel="true"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BSODRisk_HostCPUContention
+        exp_alerts: []
+
+  # Negative: a NON-KubeVirt node (no cpu-vendor label) at 3 tasks/CPU must not
+  # fire. This pins the scoping join -- the refinement the PSI implementation
+  # had to omit because the label topology was unverified.
+  - interval: 1m
+    input_series:
+      - series: 'node_schedstat_waiting_seconds_total{instance="infra-1",cpu="0"}'
+        values: '0+180x30'
+      - series: 'kube_node_labels{node="infra-1"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BSODRisk_HostCPUContention
+        exp_alerts: []
+
+  # Negative: a brief spike that does not survive the 10m `for:` window.
+  - interval: 1m
+    input_series:
+      - series: 'node_schedstat_waiting_seconds_total{instance="worker-spike",cpu="0"}'
+        values: '0+180x5 900+0x30'
+      - series: 'kube_node_labels{node="worker-spike",label_cpu_vendor_node_kubevirt_io_intel="true"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: BSODRisk_HostCPUContention
+        exp_alerts: []
+
+  # --- BSODRisk_GuestCPUSaturation (R-46, Recommendation 6) ---
+
+  # Positive: idle mode's rate is only 0.05/s (5% idle -> 95% utilized),
+  # sustained past the 15m `for:` window.
+  - interval: 1m
+    input_series:
+      - series: 'windows_cpu_time_total{instance="10.0.0.6:9182",vm_name="win-cpu-hot",vm_namespace="test",core="0",mode="idle"}'
+        values: '0+3x20'
+      - series: 'windows_cpu_time_total{instance="10.0.0.6:9182",vm_name="win-cpu-hot",vm_namespace="test",core="0",mode="user"}'
+        values: '0+57x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BSODRisk_GuestCPUSaturation
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: cpu
+              kcs: "7132511"
+              vm_name: win-cpu-hot
+              vm_namespace: test
+            exp_annotations:
+              summary: "Windows VM guest-observed CPU saturation"
+              description: |
+                Windows VM win-cpu-hot reports 95%
+                average CPU utilization (100% minus the idle-mode share) over the
+                last 5 minutes, sustained at or above the 90% saturation
+                threshold. Sustained near-100% CPU competes for the same
+                scheduling timing Windows guests need to avoid
+                CLOCK_WATCHDOG_TIMEOUT (0x101) BSODs. Investigate the in-guest
+                workload (Task Manager / Resource Monitor) and, if host-side
+                contention is also suspected, check BSODRisk_HostCPUContention
+                for this VM's node.
+              runbook_url: "https://access.redhat.com/solutions/7132511"
+              contact_first: "Microsoft (guest workload) / Red Hat (if host contention is also firing)"
+              stop_codes: "0x101"
+
+  # Negative: idle mode's rate is 0.85/s (85% idle -> 15% utilized) -- healthy.
+  - interval: 1m
+    input_series:
+      - series: 'windows_cpu_time_total{instance="10.0.0.7:9182",vm_name="win-cpu-ok",vm_namespace="test",core="0",mode="idle"}'
+        values: '0+51x20'
+      - series: 'windows_cpu_time_total{instance="10.0.0.7:9182",vm_name="win-cpu-ok",vm_namespace="test",core="0",mode="user"}'
+        values: '0+9x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BSODRisk_GuestCPUSaturation
+        exp_alerts: []
+
+  # --- BSODRisk_GuestMemorySaturation (R-46, Recommendation 6) ---
+
+  # Positive: 5% free -> 95% utilized, sustained past the 15m `for:` window.
+  - interval: 1m
+    input_series:
+      - series: 'windows_memory_physical_free_bytes{instance="10.0.0.8:9182",vm_name="win-mem-hot",vm_namespace="test"}'
+        values: '500000000x20'
+      - series: 'windows_memory_physical_total_bytes{instance="10.0.0.8:9182",vm_name="win-mem-hot",vm_namespace="test"}'
+        values: '10000000000x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BSODRisk_GuestMemorySaturation
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: resource
+              kcs: "7132512"
+              vm_name: win-mem-hot
+              vm_namespace: test
+              instance: "10.0.0.8:9182"
+            exp_annotations:
+              summary: "Windows VM guest-observed physical memory saturation"
+              description: |
+                Windows VM win-mem-hot reports 95%
+                physical memory utilization, at or above the 90% saturation
+                threshold. Sustained high physical memory pressure amplifies the
+                risk of MEMORY_MANAGEMENT (0x1A) BSODs when the system cannot
+                page out fast enough. Cross-check BSODRisk_PagefilePressure and
+                BSODRisk_MemoryPressure for this VM; if this fires without
+                either of those, pagefile/domain-level accounting may be
+                under-reporting real guest memory pressure.
+              runbook_url: "https://access.redhat.com/solutions/7132512"
+              contact_first: "Microsoft (if no recent platform changes)"
+              stop_codes: "0x1A"
+
+  # Negative: 50% free -> 50% utilized -- healthy.
+  - interval: 1m
+    input_series:
+      - series: 'windows_memory_physical_free_bytes{instance="10.0.0.9:9182",vm_name="win-mem-ok",vm_namespace="test"}'
+        values: '5000000000x20'
+      - series: 'windows_memory_physical_total_bytes{instance="10.0.0.9:9182",vm_name="win-mem-ok",vm_namespace="test"}'
+        values: '10000000000x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BSODRisk_GuestMemorySaturation
+        exp_alerts: []
+
+  # --- Recording rule expr test: bsod:fleet_evidence_completeness:ratio ---
+  #
+  # Two VMs with DIFFERENT check counts -- proves the ratio is
+  # checks-WEIGHTED (sum(assessed)/sum(total)), not an unweighted mean of
+  # per-VM percentages. VM1: 10 assessed / 10 total = 100%. VM2: 5 assessed /
+  # 20 total = 25%. Unweighted mean of (100%, 25%) = 62.5%; weighted
+  # sum(10+5)/sum(10+20) = 15/30 = 50%. These numbers are chosen specifically
+  # so the two statistics disagree -- if this ever asserts 0.625 instead of
+  # 0.5, the rule regressed back to an unweighted average.
+  - interval: 1m
+    input_series:
+      - series: 'bsod_vm_checks_assessed{namespace="test",vm="win-full-cov"}'
+        values: '10x10'
+      - series: 'bsod_vm_checks_total{namespace="test",vm="win-full-cov"}'
+        values: '10x10'
+      - series: 'bsod_vm_checks_assessed{namespace="test",vm="win-partial-cov"}'
+        values: '5x10'
+      - series: 'bsod_vm_checks_total{namespace="test",vm="win-partial-cov"}'
+        values: '20x10'
+    promql_expr_test:
+      - expr: 'bsod:fleet_evidence_completeness:ratio'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'bsod:fleet_evidence_completeness:ratio{}'
+            value: 0.5
+
+  # No VMs reporting yet -> no series (absent, not a fabricated 0 or 1) --
+  # same absent-vs-zero convention as bsod:cluster_driver_compliance:ratio.
+  # An unrelated series is fed so the test has a populated TSDB and the
+  # empty result provably comes from the rule, not an empty database.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prometheus"}'
+        values: '1x10'
+    promql_expr_test:
+      - expr: 'bsod:fleet_evidence_completeness:ratio'
+        eval_time: 6m
+        exp_samples: []
+
+  # Issue K / R-27: BSODRisk_FleetEvidenceIncomplete.
+  # Per the alert's own comment, tested directly against the RECORDING
+  # RULE's output (bsod:fleet_evidence_completeness:ratio), matching this
+  # file's existing convention for storage-latency above -- the recording
+  # rule's sum()/sum() math is trusted separately (see the promql_expr_test
+  # block directly above); this asserts the alert's threshold/for/
+  # annotations against that already-computed series.
+  #
+  # Positive: sustained 0.70 fleet-wide ratio (below the 0.8 threshold,
+  # shared/evidence-completeness-thresholds.json's fleet_warn_below_pct / 100)
+  # for the full 30m `for:` window.
+  - interval: 1m
+    input_series:
+      - series: 'bsod:fleet_evidence_completeness:ratio'
+        values: '0.70x35'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: BSODRisk_FleetEvidenceIncomplete
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: coverage
+              kcs: "N/A"
+            exp_annotations:
+              summary: "Fleet-wide BSOD evidence completeness below the configured threshold"
+              description: |
+                Checks-weighted evidence completeness across the fleet is
+                70%, below the 80% threshold. This
+                means a significant share of the checks this framework tries to
+                run per Windows VM are not reaching a verdict (UNKNOWN, not a
+                pass) -- typically because guest-side evidence (QEMU Guest
+                Agent, windows_exporter) is not deployed or not running on a
+                large part of the fleet. This alert does NOT mean BSOD risk is
+                present -- it means the framework's other alerts and gates may
+                be running mostly blind on the affected VMs. Deploy/repair the
+                QEMU Guest Agent and/or windows_exporter fleet-wide, then
+                re-check `cnv-win-bsod-audit.sh --all-namespaces --json | jq
+                '.vms[] | select(.evidence_completeness < 80)'` to find the
+                specific VMs still missing evidence.
+              runbook_url: "https://github.com/JaredBurck/ocp-virt-bsod-detection/blob/main/docs/admin-runbook.md#fleet-evidence-completeness-exporter"
+              contact_first: "N/A -- this is a framework coverage gap, not a vendor-actionable BSOD trigger"
+              stop_codes: "N/A -- observability signal, not a BSOD-risk signal"
+
+  # Negative: sustained 0.95 fleet-wide ratio -- healthy, well above the 0.8
+  # threshold.
+  - interval: 1m
+    input_series:
+      - series: 'bsod:fleet_evidence_completeness:ratio'
+        values: '0.95x35'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: BSODRisk_FleetEvidenceIncomplete
+        exp_alerts: []
+
+  # Negative: 0.70 ratio but for only 10m of the required 30m `for:` window
+  # -- must stay PENDING, not firing yet. Guards against a `for:` regression
+  # (e.g. someone shortening it to make the alert "feel" more responsive)
+  # going unnoticed, the same class of gap the storage-latency tests already
+  # cover for their own alerts.
+  - interval: 1m
+    input_series:
+      - series: 'bsod:fleet_evidence_completeness:ratio'
+        values: '0.70x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BSODRisk_FleetEvidenceIncomplete
+        exp_alerts: []
+
+  # --- BSODRisk_ExporterCollectionFailing (Issue K / R-27 §6.7) ---
+  #
+  # Positive: last_collection_success stuck at 0 for the full 15m `for:`
+  # window -- the exporter pod is up (this metric itself is being scraped)
+  # but every collection attempt has failed.
+  - interval: 1m
+    input_series:
+      - series: 'bsod_evidence_exporter_last_collection_success'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BSODRisk_ExporterCollectionFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              bsod_domain: coverage
+              kcs: "N/A"
+            exp_annotations:
+              summary: "BSOD fleet exporter is running but every collection attempt is failing"
+              description: |
+                scripts/cnv-bsod-fleet-exporter.sh's last_collection_success
+                gauge has been 0 for at least 15 minutes -- the exporter pod is
+                up and answering scrapes, but cnv-win-bsod-audit.sh --json has
+                not produced valid output in that window (RBAC narrowed,
+                apiserver auth expired, or the script itself is crashing). Every
+                per-VM evidence-completeness metric is now stale and
+                BSODRisk_FleetEvidenceIncomplete will not evaluate on fresh
+                data. Check `oc -n openshift-cnv logs deploy/bsod-fleet-exporter`
+                for the specific error.
+              runbook_url: "https://github.com/JaredBurck/ocp-virt-bsod-detection/blob/main/docs/admin-runbook.md#fleet-evidence-completeness-exporter"
+              contact_first: "N/A -- this is a framework/RBAC operational issue, not a vendor-actionable BSOD trigger"
+              stop_codes: "N/A -- observability signal, not a BSOD-risk signal"
+
+  # Negative: healthy exporter, sustained success=1.
+  - interval: 1m
+    input_series:
+      - series: 'bsod_evidence_exporter_last_collection_success'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BSODRisk_ExporterCollectionFailing
+        exp_alerts: []
+
+  # Negative: success=0 for only 5m of the required 15m `for:` window -- a
+  # single transient collection blip (e.g. one apiserver timeout) must not
+  # page anyone; only a SUSTAINED failure should.
+  - interval: 1m
+    input_series:
+      - series: 'bsod_evidence_exporter_last_collection_success'
+        values: '0x5'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BSODRisk_ExporterCollectionFailing
+        exp_alerts: []

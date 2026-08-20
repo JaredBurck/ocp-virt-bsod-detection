@@ -1,0 +1,40 @@
+{
+  "apiVersion": "kubevirt.io/v1",
+  "kind": "VirtualMachine",
+  "metadata": {
+    "name": "win2k22-instancetype",
+    "namespace": "bsod-test",
+    "labels": {
+      "vm.kubevirt.io/os": "windows2k22"
+    },
+    "annotations": {}
+  },
+  "spec": {
+    "instancetype": {
+      "name": "u1.large",
+      "kind": "VirtualMachineClusterInstancetype"
+    },
+    "preference": {
+      "name": "windows.2k22",
+      "kind": "VirtualMachineClusterPreference"
+    },
+    "template": {
+      "metadata": {
+        "annotations": {
+          "vm.kubevirt.io/os": "windows2k22"
+        },
+        "labels": {}
+      },
+      "spec": {
+        "evictionStrategy": "LiveMigrate",
+        "domain": {},
+        "volumes": [
+          {"name": "rootdisk", "persistentVolumeClaim": {"claimName": "win2k22-instancetype-rootdisk"}},
+          {"name": "virtiocontainerdisk", "containerDisk": {
+            "image": "registry.redhat.io/container-native-virtualization/virtio-win-rhel9@sha256:17b76af03fe7a3f45d63b3e8a9a2ddc3231100619d0e158f73997916580dec68"
+          }}
+        ]
+      }
+    }
+  }
+}

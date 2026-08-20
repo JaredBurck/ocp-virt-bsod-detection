@@ -1,0 +1,21 @@
+{
+  "_description": "virtio storage IoTimeoutValue thresholds (KCS-7132512). Single source of truth for the Python analyzer, the PowerShell guest collector/remediation, and the Prometheus recording rule.",
+  "_why": "M-7: these values previously existed as four uncoordinated magic numbers -- 60 and 180 in insights-rules/plugins/bsod_storage_checks.py, 300 in scripts/collect-windows-guest-info.ps1's remediation, and 60 again in alerts/bsod-risk-recording-rules.yaml. Not contradictory (300 >= 180 passes), but unmanaged: a TSE reading the analyzer learned 'set 180', read the remediation script and found 300, and read the recording rule and found a fourth threshold. Changing guidance required edits in three languages with no test binding them. The repo already enforces this discipline for virtio-win versions via shared/virtio-win-thresholds.json; this extends it.",
+
+  "registry_path": "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\<driver>\\Parameters",
+  "drivers": ["viostor", "vioscsi"],
+
+  "windows_default_seconds": 60,
+  "_windows_default_note": "Value assumed by Windows when the Parameters key or IoTimeoutValue is absent. At or below this is the documented danger zone under storage latency spikes (KCS-7132512).",
+
+  "recommended_min_seconds": 180,
+  "_recommended_min_note": "Analyzer PASS threshold. At or above this the VM is considered tuned.",
+
+  "remediation_target_seconds": 300,
+  "_remediation_target_note": "Value written by collect-windows-guest-info.ps1 -Remediate. Deliberately above recommended_min so a remediated guest has headroom rather than sitting exactly on the PASS boundary. Requires a guest reboot to take effect.",
+
+  "risk_factor_at_or_below_seconds": 60,
+  "_risk_factor_note": "Threshold used by bsod:vm_risk_factor_count:gauge in alerts/bsod-risk-recording-rules.yaml. Kept equal to windows_default_seconds: the metric counts VMs still sitting at the untuned default.",
+
+  "kcs": "7132512"
+}

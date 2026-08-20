@@ -1,0 +1,4 @@
+# windows-exporter — conventions
+
+- **windows_exporter textfile directory requires `config.yaml`** — MSI `TEXTFILE_DIR` property alone does not propagate to the service. Installer generates `config.yaml` with forward-slash paths (`C:/ProgramData/...`) to avoid YAML `\t` escape issues
+- **`bsod-textfile-collector.ps1` writes atomically and escapes label values** — driver/registry-sourced strings (`DriverVersion`, package `Version`) go through `ConvertTo-EscapedPrometheusLabelValue` (backslash/quote/newline) before being embedded in a label, and the `.prom` file is written to a per-PID temp file then `Move-Item`'d into place so windows_exporter's own scheduled scrape never reads a partial write. Any new label built from dynamic (non-hardcoded) data in that script must go through the same escape helper

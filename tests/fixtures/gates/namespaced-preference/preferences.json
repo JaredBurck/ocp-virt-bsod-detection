@@ -1,0 +1,19 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "instancetype.kubevirt.io/v1beta1",
+      "kind": "VirtualMachineClusterPreference",
+      "metadata": {
+        "name": "windows.2k22",
+        "labels": {}
+      },
+      "spec": {
+        "devices": {
+          "preferredDiskBus": "sata"
+        }
+      }
+    }
+  ]
+}

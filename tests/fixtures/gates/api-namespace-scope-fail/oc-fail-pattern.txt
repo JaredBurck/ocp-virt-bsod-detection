@@ -1,0 +1,1 @@
+get vm -n bsod-test-2|get vmi -n bsod-test-2

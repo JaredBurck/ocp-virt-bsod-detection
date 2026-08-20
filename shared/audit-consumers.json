@@ -1,0 +1,84 @@
+{
+  "_description": "Declared inventory of every artifact that consumes cnv-win-bsod-audit.sh's verdict, and HOW each one decides. Enforced by scripts/ci/validate-unattended-consumers.py.",
+  "_why": "Three consecutive review rounds found the same failure shape: a capability is built correctly at its source and the wiring to ONE MORE CONSUMER is left incomplete. The UNKNOWN severity contract was fixed in the rules (v0.15.0) but not in the Tekton PreHook Job (H2, v0.16.0), which decided purely on the raw exit code and so migrated VMs the framework never assessed.\n\nThe v0.16.0 fix -- an opt-in --fail-on-unknown flag -- closes that instance but, on its own, recreates the trap: every FUTURE unattended consumer must remember to set it. A flag default cannot prevent that; an enumeration can. This file is the enumeration. Adding a new caller of the audit script fails CI until it is declared here with an explicit decision mode, which forces the question 'how does this consumer treat UNKNOWN?' to be answered on the way in rather than discovered in a later review.",
+  "_decision_modes": {
+    "exit_code": "Acts on the audit's process exit status. Exit 0 means 'no confirmed failures' -- NEVER 'safe' -- so an unattended consumer in this mode MUST pass --fail-on-unknown or it will treat an unassessed VM as a passing one.",
+    "text_parse": "Greps the human-readable report for [FAIL]/[WARN]/[UNKN] and forms its own verdict. Safe with respect to UNKNOWN provided it maps UNKNOWN to a non-passing state; cnv-mtv-plan-gate.sh demotes it to REVIEW/WARN.",
+    "json_summary": "Reads --json .summary counts. Safe provided it inspects the `unknown` field, which the schema has exposed since v0.15.0.",
+    "output_capture": "Archives the report as evidence and does NOT act on the verdict at all. Exit code is irrelevant; nothing is gated.",
+    "entrypoint_passthrough": "Provides the audit as a container ENTRYPOINT. Makes no decision itself -- the decision belongs to whatever supplies the args and reads the result."
+  },
+  "consumers": [
+    {
+      "path": "tekton/bsod-gate-prehook-job.yaml",
+      "decides_via": "exit_code",
+      "unattended": true,
+      "requires_flags": [
+        "--fail-on-unknown"
+      ],
+      "rationale": "MTV/Forklift PreHook. Kubernetes Job success IS the migration decision and no human reads the report, so it must block on both FAIL and UNKNOWN. Sets BSOD_FAIL_ON_UNKNOWN=true by default.",
+      "invocation": "direct"
+    },
+    {
+      "path": "tekton/bsod-gate-task.yaml",
+      "decides_via": "json_summary",
+      "unattended": true,
+      "requires_flags": [],
+      "rationale": "Runs cnv-mtv-plan-gate.sh and reads its JSON .verdict, not the audit's exit code. plan-gate already demotes UNASSESSED to WARN and never to PASS.",
+      "invocation": "indirect",
+      "via": "cnv-mtv-plan-gate.sh"
+    },
+    {
+      "path": "scripts/cnv-mtv-plan-gate.sh",
+      "decides_via": "text_parse",
+      "unattended": false,
+      "requires_flags": [],
+      "rationale": "Counts [FAIL]/[WARN]/[UNKN] lines and forms its own verdict; UNASSESSED maps to a review state, never PASS. Its own output is what the Tekton Task gates on.",
+      "invocation": "direct"
+    },
+    {
+      "path": "scripts/cnv-mtv-fleet-readiness.sh",
+      "decides_via": "text_parse",
+      "unattended": false,
+      "requires_flags": [],
+      "rationale": "Delegates to cnv-mtv-plan-gate.sh per plan and rolls UNASSESSED into the review bucket in both the per-wave and fleet-total aggregations (N4).",
+      "invocation": "indirect",
+      "via": "cnv-mtv-plan-gate.sh"
+    },
+    {
+      "path": "must-gather/collection-scripts/gather_virt_bsod_pre",
+      "decides_via": "output_capture",
+      "unattended": false,
+      "requires_flags": [],
+      "export": "internal",
+      "rationale": "run_and_save archives the per-VM report into the must-gather tree as evidence. Nothing is gated on the result; the analysis happens later in insights-rules/analyze.py. Layer 1 -- absent from the public GitHub tree; the inventory validator skips a missing path when export=internal.",
+      "invocation": "direct"
+    },
+    {
+      "path": "must-gather/collection-scripts/gather_virt_bsod_post",
+      "decides_via": "output_capture",
+      "unattended": false,
+      "requires_flags": [],
+      "export": "internal",
+      "rationale": "Same as gather_virt_bsod_pre, for the post-migration phase. Layer 1 -- absent from the public GitHub tree; the inventory validator skips a missing path when export=internal.",
+      "invocation": "direct"
+    },
+    {
+      "path": "Dockerfile.gate",
+      "decides_via": "entrypoint_passthrough",
+      "unattended": false,
+      "requires_flags": [],
+      "rationale": "Ships the audit as the image ENTRYPOINT. The image makes no decision -- callers supply args and interpret the result. The shipped unattended caller (bsod-gate-prehook-job.yaml) overrides the command and passes --fail-on-unknown. A caller running this image bare for an unattended gate must do the same.",
+      "invocation": "direct"
+    },
+    {
+      "path": "scripts/cnv-bsod-fleet-exporter.sh",
+      "decides_via": "json_summary",
+      "unattended": true,
+      "requires_flags": [],
+      "rationale": "Issue K / R-27: continuous exporter Deployment, runs forever on a timer with no human reading the report. Reads --json .vms[].assessed_count/unassessed_count (and .summary.total_vms) and re-emits them as bsod_vm_checks_assessed/_total gauges for a Prometheus recording rule + alert to decide on later -- it never forms its own PASS/FAIL/WARN verdict and deliberately ignores the audit's exit code entirely (collect_once()'s own comment: a FAIL-exit is a normal, non-failure outcome; only 'did it produce parseable JSON with .summary' gates trust). The unassessed/UNKNOWN count is the primary signal this component exists to expose as bsod_vm_checks_total, not a blind spot it could hide -- same safety shape as tekton/bsod-gate-task.yaml's json_summary entry. R-27 Phase 2: also reads .vms[].tier/fail_count/warn_count, re-emitted as bsod_vm_risk_tier/bsod_vm_finding_count -- tier is overridden to UNKNOWN when assessed_count==0 for that VM (zero evidence is not a real verdict), but this remains a pure relabel of what cnv-win-bsod-audit.sh already computed, not a second verdict-forming pass.",
+      "invocation": "direct"
+    }
+  ],
+  "_invocation_note": "direct = names/executes the audit script itself (the scanner asserts these match reality). indirect = consumes a verdict produced by another declared consumer (recorded so the UNKNOWN question is answered for it too, but not scanned for -- it is reached through its `via` delegate)."
+}
